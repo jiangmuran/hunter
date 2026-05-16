@@ -683,6 +683,16 @@ def install_event_hooks():
                 if minimap is not None:
                     minimap.set_button_speed(bs)
             except Exception: pass
+        elif line == "3WD-ROBOT-START":
+            # ESP32 刚刚启动(物理复位或 USB 重插)→ 1 秒后自动重新启用 ULTRA_REPORT
+            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 1s", "sys")
+            def _reapply():
+                try:
+                    if car is not None:
+                        car.ultrasonic_report_on()
+                except Exception as e:
+                    push_log(f"auto re-enable ultra_report failed: {e}", "sys")
+            threading.Timer(1.0, _reapply).start()
 
         if not line.startswith("ULTRA,"):
             push_log(line, "esp32")
@@ -953,6 +963,22 @@ app = FastAPI(
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     return HTMLResponse(INDEX_HTML)
+
+
+@app.post("/api/system/restart", tags=["state"], summary="重启 robot-console.service",
+          description="模块炸掉时一键重启服务(systemctl restart)。Popen 触发后 systemctl 通过 dbus 让 systemd kill+restart 本进程,客户端 WS 会断开然后自动重连。")
+async def system_restart():
+    import subprocess as _sp
+    push_log("system: restart requested via API", "sys")
+    try:
+        _sp.Popen(
+            ["sudo", "systemctl", "restart", "robot-console"],
+            stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"restart failed: {e}")
+    return {"ok": True, "msg": "systemctl restart issued; service will restart in ~3s"}
 
 
 @app.get("/api/state", tags=["state"], summary="拉取当前完整状态 + 最近 80 条日志",
@@ -1316,7 +1342,7 @@ async def get_volume():
 
 
 @app.post("/api/audio/volume", tags=["audio"], summary="设 ALSA mixer 音量",
-          description="body 任选字段:`{speaker: 0-100, mic: 0-100, agc: 0|1}`")
+          description="body 任选字段:`{speaker: 0-100, mic: 0-100, agc: 0|1}`。会通过 WS 广播,多客户端同步。")
 async def set_volume(req: Request):
     body = await req.json()
     out = {}
@@ -1325,16 +1351,39 @@ async def set_volume(req: Request):
             ok = _amixer_set(ctrl, body[k_in])
             out[k_in] = _amixer_get(ctrl) if ok else None
             push_log(f"vol {k_in} → {out[k_in]}%", "audio")
+    # 广播给所有客户端同步 slider 位置
+    bcast({"type": "volume", "data": {
+        "speaker": _amixer_get("Speaker"),
+        "mic": _amixer_get("Mic"),
+    }})
     return out
 
 
-@app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放")
+@app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放 (audio_driver 和 car_driver 两路 aplay 都 kill)")
 async def audio_stop():
-    if audio is None:
-        raise HTTPException(503, "audio not ready")
-    audio.stop_playback()
-    push_log("audio playback stopped", "audio")
-    return {"ok": True}
+    import subprocess as _sp
+    sources = []
+    # 1) AudioController 的播放
+    if audio is not None:
+        try:
+            audio.stop_playback()
+            sources.append("audio")
+        except Exception as e:
+            push_log(f"audio_driver stop err: {e}", "sys")
+    # 2) CarController 的猫叫播放(cat1-4 走的是 car_driver.play_wav,跟 audio_driver 是不同 subprocess)
+    if car is not None:
+        try:
+            with car.audio_lock:
+                if car.audio_process is not None and car.audio_process.poll() is None:
+                    car.audio_process.terminate()
+                    try: car.audio_process.wait(timeout=0.3)
+                    except _sp.TimeoutExpired: car.audio_process.kill()
+                    car.audio_process = None
+                    sources.append("car")
+        except Exception as e:
+            push_log(f"car audio stop err: {e}", "sys")
+    push_log(f"audio stopped ({', '.join(sources) or 'nothing playing'})", "audio")
+    return {"ok": True, "stopped_sources": sources}
 
 
 # ====================== Camera stream ======================
@@ -1497,7 +1546,9 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 .pane-cam{grid-area:cam}
 .pane-cam .panel-body{gap:10px;padding:10px}
 
-.cam-frame{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line2);overflow:hidden;flex:0 0 auto}
+.cam-frame{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line2);overflow:hidden;flex:0 0 auto;
+  max-height:55vh}
+.pane-cam .panel-body{overflow-y:auto}
 .cam-frame::before{content:"";position:absolute;inset:0;
   background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,rgba(255,176,0,.04) 2px,rgba(255,176,0,.04) 3px);
   pointer-events:none;z-index:2;
@@ -1680,6 +1731,8 @@ svg.schem{width:100%;height:100%;display:block}
       <div class="h-stat" title="USB 摄像头"><div class="dot" id="dotCam"></div><span>CAM</span></div>
       <div class="h-stat" title="树莓派 CPU 温度"><span style="color:var(--text-mute)">T°</span><span id="cpuTemp">--</span></div>
       <div class="h-stat" title="启动时长"><span style="color:var(--text-mute)">T+</span><span id="uptime">00:00:00</span></div>
+      <button class="map-reset-btn" id="btnRestart" title="restart robot-console.service (sudo systemctl restart)"
+              style="border-color:var(--red-d);color:var(--red)">⟳ RESTART</button>
     </div>
   </header>
 
@@ -1981,6 +2034,11 @@ svg.schem{width:100%;height:100%;display:block}
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
       else if (m.type === 'map'){ applyMap(m.data); }
+      else if (m.type === 'volume'){
+        const v = m.data || {};
+        if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
+        if (v.mic != null){ volMic.value = v.mic; volMicVal.textContent = v.mic + '%'; }
+      }
     };
   }
   connect();
@@ -2144,8 +2202,16 @@ svg.schem{width:100%;height:100%;display:block}
   let recording = false;
   document.addEventListener('keydown', ev => {
     if (ev.repeat) return;
-    if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
     const k = ev.key.toLowerCase();
+    // ESC 是全局停止键,永远生效(即使焦点在 YOLO filter input 框)
+    if (k === 'escape'){
+      cmd('stop');
+      audioApi('/api/audio/stop');
+      if (ev.target && ev.target.blur) ev.target.blur();
+      ev.preventDefault();
+      return;
+    }
+    if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
     const action = moveMap()[k];
     if (action){
       if (pressed.has(k)) return;
@@ -2155,7 +2221,6 @@ svg.schem{width:100%;height:100%;display:block}
     }
     switch(k){
       case ' ': doEmergency(); ev.preventDefault(); break;
-      case 'escape': cmd('stop'); audioApi('/api/audio/stop'); break;
       case 'o': setObs(true); break;
       case 'p': setObs(false); break;
       case 'u': setUltra(true); break;
@@ -2446,6 +2511,26 @@ svg.schem{width:100%;height:100%;display:block}
       const r = await fetch('/api/map/state');
       if (r.ok) applyMap(await r.json());
     } catch(e){}
+  });
+
+  // RESTART 服务按钮
+  $('#btnRestart').addEventListener('click', async () => {
+    if (!confirm('Restart robot-console service?\nWebSocket 会短暂断开,几秒后自动重连。')) return;
+    try {
+      await fetch('/api/system/restart', {method: 'POST'});
+    } catch(e){}
+    // 显示重启中提示
+    let banner = document.getElementById('restartBanner');
+    if (!banner){
+      banner = document.createElement('div');
+      banner.id = 'restartBanner';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:14px;background:rgba(255,58,46,.9);color:#0b0907;'
+        + 'text-align:center;font-family:var(--font-mono);font-weight:700;letter-spacing:.2em;z-index:9999;font-size:12px;';
+      banner.textContent = '⟳ RESTARTING ROBOT-CONSOLE … RECONNECTING IN ~5s';
+      document.body.appendChild(banner);
+    }
+    // 5 秒后自动隐藏(WS 会自己重连刷新状态)
+    setTimeout(() => { try{ banner.remove(); }catch(e){} }, 8000);
   });
 
   // 页面初次加载就拉一次地图状态(不必等下次 200ms WS push)
