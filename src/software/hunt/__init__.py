@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import threading
 import time
-from software.api_client import HunterAPI
-from software.perception import CatDetector
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.software.api_client import HunterAPI
+    from src.software.perception import CatDetector
 
 # ── 可调参数 ────────────────────────────────────────────────────────────────
 TURN_THRESHOLD = 0.15   # 猫中心偏离画面中心超过帧宽的 15% → 先旋转对齐
@@ -39,7 +42,7 @@ class CatChaser:
     """
 
     def __init__(self, api: "HunterAPI", detector: "CatDetector" | None = None):
-        from src.perception import CatDetector
+        from src.software.perception import CatDetector
 
         self.api = api
         self.detector = detector or CatDetector()
