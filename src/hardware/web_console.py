@@ -90,7 +90,10 @@ state: dict = {
     "last_action": "STOP",
     "recording": False,
     "rec_path": None,
+    "rec_start_t": None,
 }
+
+MAX_RECORDING_DURATION_S = 5 * 60  # 5 分钟自动 stop,防止前端断开导致孤儿录音
 
 t_boot = time.time()
 t_last_esp32 = 0.0  # last time any ESP32 line was received
@@ -747,6 +750,14 @@ async def lifespan(app: FastAPI):
         )
         install_event_hooks()
         push_log("boot: car ready", "sys")
+        # 默认启用 ULTRA_REPORT,让超声波数据开箱即用。
+        # 用户切到 OBSTACLE 模式时 setObs(true) 会先 ultra_off 再 obstacle_on(互斥已处理)。
+        try:
+            await asyncio.sleep(0.3)
+            car.ultrasonic_report_on()
+            push_log("boot: enabled ULTRA_REPORT by default", "sys")
+        except Exception as e:
+            push_log(f"boot: ultra_report auto-enable failed: {e}", "sys")
     except Exception as e:
         push_log(f"boot: car FAILED: {e}", "sys")
         car = None
@@ -793,20 +804,46 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
-    # ---- 串口故障检测 + 自动重连(USB 热插拔 / ESP32 偶发掉线)----
+    # ---- ESP32 串口故障检测 + 自动重连(覆盖三种场景)----
+    # 1) 开机时 car init 就失败 (USB 没插好 / ESP32 没上电) → 重试 init
+    # 2) 运行中 USB 拔了 / 串口失效 → reopen
+    # 3) ESP32 firmware 复位但 host serial 还有效 → 不动 (reader 会自己收数据)
     async def _serial_watchdog():
+        nonlocal_dummy = None  # placeholder
+        global car
         consec_fail = 0
         while True:
             try:
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 return
+            # 场景 1: car 整个没初始化成功 → 重试 CarController()
             if car is None:
+                try:
+                    push_log("serial watchdog: trying CarController init...", "sys")
+                    new_car = CarController(
+                        ultrasonic_callback=on_ultra,
+                        ps3_l1_callback=on_ps3_l1,
+                        ps3_l2_callback=on_ps3_l2,
+                    )
+                    car = new_car
+                    install_event_hooks()
+                    push_log("serial watchdog: car initialized after retry", "sys")
+                    consec_fail = 0
+                    try:
+                        await asyncio.sleep(0.3)
+                        car.ultrasonic_report_on()
+                        push_log("serial watchdog: re-enabled ULTRA_REPORT", "sys")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    consec_fail += 1
+                    push_log(f"serial watchdog: car init failed #{consec_fail}: {e}", "sys")
                 continue
+            # 场景 2: car 存在但串口探测异常 → close + reopen
             try:
                 if car.ser is None or not car.ser.is_open:
                     raise IOError("ser not open")
-                # 探测:in_waiting / port 属性 — 设备真不在了会抛
                 _ = car.ser.in_waiting
                 _ = car.ser.port
                 consec_fail = 0
@@ -814,22 +851,42 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 consec_fail += 1
                 push_log(f"serial watchdog: fault #{consec_fail}: {e}", "sys")
-            # 重连
             try: car.ser.close()
             except Exception: pass
-            await asyncio.sleep(min(2 + consec_fail, 10))  # backoff
+            await asyncio.sleep(min(2 + consec_fail, 10))
             try:
                 new_ser = _pyserial.Serial(
-                    port=car.port,
-                    baudrate=car.baudrate,
-                    timeout=0.1,
+                    port=car.port, baudrate=car.baudrate, timeout=0.1,
                 )
                 car.ser = new_ser
-                push_log(f"serial: reconnected ok ({car.port})", "sys")
+                push_log(f"serial watchdog: reconnected ({car.port})", "sys")
                 consec_fail = 0
             except Exception as e2:
-                push_log(f"serial reconnect failed: {e2}", "sys")
+                push_log(f"serial watchdog: reconnect failed: {e2}", "sys")
     _sw_task = asyncio.create_task(_serial_watchdog())
+
+    # ---- 录音超时:5 分钟自动 stop,防止前端断开/标签关闭导致 arecord 孤儿 ----
+    async def _rec_timeout_watcher():
+        while True:
+            try:
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                return
+            if not state.get("recording"): continue
+            start = state.get("rec_start_t")
+            if start is None: continue
+            elapsed = time.time() - start
+            if elapsed > MAX_RECORDING_DURATION_S and audio is not None:
+                push_log(f"audio: auto-stop after {int(elapsed)}s (max {MAX_RECORDING_DURATION_S}s)", "audio")
+                try:
+                    p = audio.stop_recording()
+                    state["recording"] = False
+                    state["rec_path"] = None
+                    state["rec_start_t"] = None
+                    bcast({"type": "state", "data": state})
+                except Exception as e:
+                    push_log(f"audio auto-stop err: {e}", "sys")
+    _rt_task = asyncio.create_task(_rec_timeout_watcher())
 
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
@@ -851,6 +908,7 @@ async def lifespan(app: FastAPI):
     push_log("system shutdown", "sys")
     _mm_task.cancel()
     _sw_task.cancel()
+    _rt_task.cancel()
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         try: obj.close() if hasattr(obj, "close") else obj.stop()
@@ -1158,6 +1216,7 @@ async def audio_rec_start():
         raise HTTPException(500, str(e))
     state["recording"] = True
     state["rec_path"] = path
+    state["rec_start_t"] = time.time()
     push_log(f"rec start: {fn}", "audio")
     bcast({"type": "state", "data": state})
     return {"ok": True, "path": path}
@@ -1175,6 +1234,7 @@ async def audio_rec_stop():
         raise HTTPException(500, str(e))
     state["recording"] = False
     state["rec_path"] = None
+    state["rec_start_t"] = None
     push_log(f"rec save: {os.path.basename(path) if path else '?'}", "audio")
     bcast({"type": "state", "data": state})
     return {"ok": True, "path": path}
@@ -2017,6 +2077,17 @@ svg.schem{width:100%;height:100%;display:block}
     pressed.forEach(k => { stopHold(moveMap[k]); highlightKey(k, false); });
     pressed.clear();
     stopRec();
+  });
+
+  // 关 tab / 刷新 / 关浏览器时,保证 stop recording 一定发出 (sendBeacon 比 fetch 可靠)
+  window.addEventListener('beforeunload', () => {
+    if (recording){
+      try{ navigator.sendBeacon('/api/audio/rec/stop'); }catch(e){}
+    }
+    // 同时停止任何 hold 中的方向 cmd
+    if (Object.keys(holdTimers).length > 0){
+      try{ navigator.sendBeacon('/api/cmd/stop'); }catch(e){}
+    }
   });
   function highlightKey(k, on){
     const el = document.querySelector(`.key[data-key="${k}"]`);
