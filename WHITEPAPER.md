@@ -1,8 +1,8 @@
-# Hunter 白皮书
+# Hunter Whitepaper
 
-| 文档 | 面向 | 内容 |
-|------|------|------|
-| [对外-项目介绍](whitepaper/对外-项目介绍.md) | 评委 / 投资人 / 合作方 | 故事、洞察、产品、商业模式、路演金句 |
-| [对内-技术与执行文档](whitepaper/对内-技术与执行文档.md) | 自己 / 团队 | 架构、代码、API、48h 执行计划、路线图、决策记录 |
-| [功能详细说明](whitepaper/功能详细说明.md) | 评委 / 技术评审 | 11 项功能 5W1H 完整说明，感知 / 逗猫 / 照料三模块 |
-| [系统流程与伪代码](whitepaper/系统流程与伪代码.md) | 开发者 / 团队 | 整体流程图、主循环伪代码、各模块详细伪代码 |
+| Document | Audience | Content |
+|----------|----------|---------|
+| [pitch.md](whitepaper/pitch.md) | Judges / Investors / Partners | Story, market data, selling points, business model, pitch strategy |
+| [tech-spec.md](whitepaper/tech-spec.md) | Team / Developers | Architecture, API, 48h execution plan, roadmap, decision log |
+| [features.md](whitepaper/features.md) | Judges / Tech reviewers | 11-feature 5W1H specification across perception / hunt / care |
+| [architecture.md](whitepaper/architecture.md) | Developers | System flowchart, main loop pseudocode, per-module pseudocode |
