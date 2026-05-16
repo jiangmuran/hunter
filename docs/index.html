@@ -792,6 +792,137 @@ footer{
 .amber-text{color:var(--amber)}
 .mono{font-family:var(--font-mono)}
 
+/* SELLING POINTS */
+.sp-list{margin-top:48px;display:flex;flex-direction:column;gap:0}
+.sp-item{
+  display:grid;
+  grid-template-columns:120px 1fr;
+  gap:40px;
+  padding:40px 0;
+  border-bottom:1px solid var(--border);
+  position:relative;
+}
+.sp-item::before{
+  content:'';
+  position:absolute;
+  left:0;top:0;bottom:0;
+  width:2px;
+  background:linear-gradient(to bottom,var(--cyan),transparent);
+  transform:scaleY(0);
+  transform-origin:top;
+  transition:transform .5s;
+}
+.sp-item:hover::before{transform:scaleY(1)}
+.sp-left{display:flex;flex-direction:column;gap:12px;padding-top:4px}
+.sp-num{
+  font-family:var(--font-mono);
+  font-size:48px;
+  font-weight:700;
+  color:rgba(0,229,255,.15);
+  line-height:1;
+}
+.sp-tag{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  color:var(--cyan);
+  text-transform:uppercase;
+  padding:4px 10px;
+  border:1px solid rgba(0,229,255,.3);
+  display:inline-block;
+}
+.sp-title{
+  font-size:20px;
+  font-weight:600;
+  color:#fff;
+  margin-bottom:16px;
+  line-height:1.3;
+}
+.sp-body{
+  font-size:14px;
+  color:var(--text-dim);
+  line-height:1.9;
+}
+.sp-body strong{color:var(--text)}
+.sp-body em{color:var(--cyan);font-style:normal}
+.sp-quote{
+  margin:12px 0;
+  padding:16px 20px;
+  background:rgba(0,0,0,.4);
+  border-left:2px solid var(--cyan);
+  font-size:13px;
+  color:var(--text);
+  line-height:1.8;
+  font-style:italic;
+}
+
+/* USERS */
+.users-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:24px;
+  margin-top:48px;
+  align-items:start;
+}
+.user-profile-card{
+  padding:32px;
+  background:var(--surface);
+  border:1px solid var(--border);
+}
+.user-attrs{display:flex;flex-direction:column;gap:12px}
+.user-attr{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:10px 0;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  font-size:13px;
+}
+.attr-label{color:var(--text-dim);font-family:var(--font-mono);font-size:11px;letter-spacing:.1em}
+.attr-val{color:#fff;font-weight:500}
+.tam-table-wrap{display:flex;flex-direction:column;gap:0}
+
+/* EXPO PITCH */
+.expo-hook{
+  margin-top:48px;
+  padding:48px;
+  background:rgba(255,41,82,.05);
+  border:1px solid rgba(255,41,82,.2);
+  border-left:3px solid var(--red);
+  position:relative;
+}
+.expo-hook::before{
+  content:'EXPO 30s HOOK';
+  position:absolute;top:20px;right:24px;
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.2em;color:var(--red);opacity:.5;
+}
+.expo-text{
+  font-size:20px;
+  line-height:1.9;
+  color:#fff;
+  font-style:italic;
+}
+.expo-text em{color:var(--cyan);font-style:normal;font-weight:600}
+.expo-note{
+  margin-top:20px;
+  font-family:var(--font-mono);
+  font-size:12px;
+  color:var(--red);
+  letter-spacing:.05em;
+}
+
+/* RISK TABLE */
+.risk-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:48px}
+.risk-table th{
+  padding:12px 20px;font-family:var(--font-mono);font-size:10px;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--text-dim);
+  border-bottom:1px solid var(--border);text-align:left;
+}
+.risk-table td{padding:14px 20px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--text);vertical-align:top}
+.risk-high{color:var(--red)}
+.risk-mid{color:var(--amber)}
+.risk-low{color:var(--green)}
+
 @media(max-width:768px){
   nav{padding:0 20px}
   .nav-links{display:none}
@@ -800,6 +931,9 @@ footer{
   .hero-stats{gap:24px;flex-wrap:wrap}
   .business-grid{grid-template-columns:1fr}
   footer{flex-direction:column;gap:16px;text-align:center}
+  .sp-item{grid-template-columns:1fr;gap:16px}
+  .users-grid{grid-template-columns:1fr}
+  .expo-hook{padding:24px}
 }
 </style>
 </head>
@@ -810,12 +944,13 @@ footer{
   <div class="nav-logo">H U N T E R</div>
   <div class="nav-links">
     <a href="#problem">Problem</a>
-    <a href="#insights">Insights</a>
+    <a href="#selling-points">Why Us</a>
+    <a href="#users">Users</a>
     <a href="#features">Features</a>
-    <a href="#arch">Architecture</a>
+    <a href="#arch">Arch</a>
     <a href="#business">Business</a>
     <a href="#competition">Market</a>
-    <a href="#quotes">Pitch</a>
+    <a href="#pitch-strategy">Pitch</a>
   </div>
 </nav>
 
@@ -968,10 +1103,137 @@ footer{
 
 <div class="sep"></div>
 
+<!-- SELLING POINTS -->
+<section id="selling-points">
+  <div class="container">
+    <div class="section-tag">03 — Why Hunter Wins</div>
+    <h2 class="section-title">Five theses <span>no competitor</span> can answer</h2>
+    <p class="section-desc">每个卖点都对应一个现有产品无法解决的结构性问题，也对应评审的一个评分维度。</p>
+
+    <div class="sp-list">
+
+      <div class="sp-item">
+        <div class="sp-left">
+          <div class="sp-num">01</div>
+          <div class="sp-tag">创新性</div>
+        </div>
+        <div class="sp-right">
+          <div class="sp-title">完整的生物学闭环 — 现有 1000+ SKU，无一做到</div>
+          <div class="sp-body">猫的捕猎行为在神经科学层面分三阶段：<strong>寻找 → 追逐 → 捕获</strong>。任何一个阶段缺失，多巴胺回路都不完整。这就是为什么激光玩具会让猫焦虑——追逐回路启动，捕获回路永远不关闭，长期引发强迫症行为。
+          <br><br>
+          Hunter 构建了完整的<em>狩猎 → 捕获 → 进食</em>闭环：机械臂模拟猎物动态，猫扑中时底盘自动投出零食作为奖励。市面上 SKU 超过 1000 款的自动逗猫产品，<strong>没有一款</strong>实现了这个闭环。这是空白。</div>
+        </div>
+      </div>
+
+      <div class="sp-item">
+        <div class="sp-left">
+          <div class="sp-num">02</div>
+          <div class="sp-tag">技术难度</div>
+        </div>
+        <div class="sp-right">
+          <div class="sp-title">AI 必须主动制造意外 — 惊喜熵引擎</div>
+          <div class="sp-body">所有 AI 产品都在优化：追求"最准确"、"最点击"。<strong>但优化是猫无聊的根源。</strong>
+          <br><br>
+          Hunter 引入全新指标：<em>惊喜熵（Surprise Entropy）</em>——实时衡量当前动作对这只猫的不可预测程度。算法目标不是"让猫扑得更准"，而是维持<strong>70% 把握 + 30% 不确定</strong>的心流区间（Csikszentmihalyi 心流理论的工程实现）。
+          <br><br>
+          Hunter 会<strong>故意失败</strong>（让猫扑中）、<strong>故意打破规律</strong>（在猫预测下一步前反转）、<strong>故意"笨拙"</strong>（模拟受伤猎物）。相当于给猫配了一个 AlphaGo——但方向相反：目标不是赢，而是<em>永远恰好比你强一点点</em>。</div>
+        </div>
+      </div>
+
+      <div class="sp-item">
+        <div class="sp-left">
+          <div class="sp-num">03</div>
+          <div class="sp-tag">商业潜力</div>
+        </div>
+        <div class="sp-right">
+          <div class="sp-title">第一个为"不会说话的存在"设计的 AI</div>
+          <div class="sp-body">现有所有 AI 产品——ChatGPT、Siri、Copilot——都依赖<strong>语言</strong>作为接口。Hunter 读的是尾巴姿态、耳朵角度、全身体态和声纹情绪。这是 Ambient Computing 的极致：AI 在没有任何主动指令的情况下读懂主体。
+          <br><br>
+          英文定义：<em>"AI for the Inarticulate."</em> 今天做猫，明天技术栈可平移到：<strong>失能老人</strong>（中国 60岁以上 2.8亿）、<strong>低龄婴儿</strong>、<strong>特殊需求儿童</strong>。猫是起点，不是终点。</div>
+        </div>
+      </div>
+
+      <div class="sp-item">
+        <div class="sp-left">
+          <div class="sp-num">04</div>
+          <div class="sp-tag">护城河</div>
+        </div>
+        <div class="sp-right">
+          <div class="sp-title">每台 Hunter 最终都不一样 — 真正的 AI 原生硬件</div>
+          <div class="sp-body">传统硬件：出厂是什么样，用一年还是什么样。Hunter 出厂时相同，但和"它的那只猫"持续共同进化：
+          <br><br>
+          这只猫不喜欢被快速逼近 → Hunter 永久记录，调低逼近速度。这只猫偏好激光胜过逗猫棒 → 权重倾斜，但偶尔切换保持新鲜感。这只猫每天 17:30 最活跃 → 自动在这个时段加大强度。
+          <br><br>
+          六个月后，张三家的 Hunter 和李四家的 Hunter，<strong>"灵魂"已经不一样了</strong>。用户换设备 = 失去六个月的人格化记忆。<em>Churn 率接近零，时间站在我们这边。</em></div>
+        </div>
+      </div>
+
+      <div class="sp-item">
+        <div class="sp-left">
+          <div class="sp-num">05</div>
+          <div class="sp-tag">情感穿透力</div>
+        </div>
+        <div class="sp-right">
+          <div class="sp-title">AI 日记和记忆盒子 — 猫的整个生命</div>
+          <div class="sp-body">每晚推送的不是数据图表，是 LLM 写的文字：<br><br>
+          <blockquote class="sp-quote">"今天 Mochi 在阳光下睡了两小时，醒来后试图捕捉那只羽毛玩具 23 次，差两次几乎得手，失手后假装根本不在乎。下午四点，它坐在窗台上盯着楼下的鸽子看了整整 40 分钟，尾巴的节奏是我见过最专注的样子。"</blockquote>
+          Hunter 在猫的整个生命中持续记录每一个互动瞬间。<strong>猫离世后，自动整理「它的一生」。</strong><br><br>
+          调研：<strong>73%</strong> 宠物主最担忧猫独处时是否孤独，<strong>68%</strong> 认为无法记录猫的日常是最大遗憾。Hunter 同时解决这两个问题。营销只需一句话：<em>"Hunter 会记得它生命的每一天。"</em></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- TARGET USERS -->
+<section id="users">
+  <div class="container">
+    <div class="section-tag">04 — Target Users</div>
+    <h2 class="section-title">Who we <span>serve</span>, and who we don't</h2>
+    <p class="section-desc">V1 唯一目标用户：25–35岁，一线城市，独居，工作日 9h+ 不在家，月收入 &gt;1.5万，有 1只 1–8岁活力猫。</p>
+
+    <div class="users-grid">
+      <div class="user-profile-card">
+        <div class="section-tag" style="margin-bottom:20px">理想用户画像</div>
+        <div class="user-attrs">
+          <div class="user-attr"><span class="attr-label">年龄</span><span class="attr-val">25–35岁</span></div>
+          <div class="user-attr"><span class="attr-label">城市</span><span class="attr-val">一线 / 新一线</span></div>
+          <div class="user-attr"><span class="attr-label">居住</span><span class="attr-val">独居或同居无孩</span></div>
+          <div class="user-attr"><span class="attr-label">猫咪</span><span class="attr-val">1只，1–8岁，活力健康</span></div>
+          <div class="user-attr"><span class="attr-label">离家时长</span><span class="attr-val red-text">&gt; 9小时 / 工作日</span></div>
+          <div class="user-attr"><span class="attr-label">月收入</span><span class="attr-val">&gt; ¥15,000</span></div>
+          <div class="user-attr"><span class="attr-label">付费意愿</span><span class="attr-val green-text">¥1,500–3,000 智能家居</span></div>
+        </div>
+      </div>
+      <div class="tam-table-wrap">
+        <table class="data-table">
+          <thead><tr><th>层级</th><th>人群定义</th><th>规模</th></tr></thead>
+          <tbody>
+            <tr><td><span class="neon-text mono">TAM</span></td><td>中国全体宠物猫主人</td><td class="val">~6,000万人</td></tr>
+            <tr><td><span style="color:var(--amber)" class="mono">SAM</span></td><td>一线/新一线，有1只猫，月收入&gt;1.5万</td><td class="val">~800万人</td></tr>
+            <tr><td><span style="color:var(--green)" class="mono">SOM Y1</span></td><td>早期科技宠物用户，对AI硬件有付费意愿</td><td class="val">~15万人</td></tr>
+            <tr><td><span style="color:var(--red)" class="mono">Target</span></td><td>Y1 销售目标，验证 PMF</td><td class="val">1万台 / GMV ¥2000万</td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:20px;padding:20px 24px;background:rgba(255,41,82,.06);border:1px solid rgba(255,41,82,.2);border-left:2px solid var(--red)">
+          <div class="section-tag" style="margin-bottom:12px;color:var(--red)">明确不服务（边界即护城河）</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.8">多猫家庭（V2再做）· 老年猫 · 病猫/术后猫（医疗器械范畴）· 狗（运动尺度差异太大）· 老人独居<br>
+          <span style="color:var(--text);margin-top:8px;display:block">评委若问"为什么不做狗"——正确答案是"V1不做，聚焦比宽泛更有力量"。</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
 <!-- FEATURES -->
 <section id="features">
   <div class="container">
-    <div class="section-tag">03 — Feature Matrix</div>
+    <div class="section-tag">05 — Feature Matrix</div>
     <h2 class="section-title"><span>11</span> modules, one organism</h2>
     <p class="section-desc">点击任意功能模块查看完整伪代码实现。三层架构：感知 → 猎捕 → 护理，形成完整的行为闭环。</p>
 
@@ -986,7 +1248,7 @@ footer{
 <!-- ARCHITECTURE -->
 <section id="arch">
   <div class="container">
-    <div class="section-tag">04 — System Architecture</div>
+    <div class="section-tag">06 — System Architecture</div>
     <h2 class="section-title">Main <span>loop</span> topology</h2>
     <p class="section-desc">Hunter 以 10Hz 主循环运行。所有感知、决策、执行操作均在 Raspberry Pi 5 本地完成，FastAPI RCU 提供统一控制接口。</p>
 
@@ -1060,7 +1322,7 @@ footer{
 <!-- BUSINESS -->
 <section id="business">
   <div class="container">
-    <div class="section-tag">05 — Business Model</div>
+    <div class="section-tag">07 — Business Model</div>
     <h2 class="section-title">Unit economics <span>at scale</span></h2>
 
     <div class="business-grid">
@@ -1120,7 +1382,7 @@ footer{
 <!-- COMPETITION -->
 <section id="competition">
   <div class="container">
-    <div class="section-tag">06 — Competitive Landscape</div>
+    <div class="section-tag">08 — Competitive Landscape</div>
     <h2 class="section-title">The field is <span>empty</span></h2>
 
     <table class="comp-table">
@@ -1191,7 +1453,7 @@ footer{
 <!-- TIMELINE -->
 <section id="pitch">
   <div class="container">
-    <div class="section-tag">07 — 48h Execution Plan</div>
+    <div class="section-tag">09 — 48h Execution Plan</div>
     <h2 class="section-title">From <span>zero</span> to demo</h2>
 
     <div class="timeline">
@@ -1221,40 +1483,125 @@ footer{
 
 <div class="sep"></div>
 
+<!-- EXPO PITCH STRATEGY -->
+<section id="pitch-strategy">
+  <div class="container">
+    <div class="section-tag">08 — Pitch Strategy</div>
+    <h2 class="section-title">30 seconds to <span>hook</span> a judge</h2>
+
+    <div class="expo-hook">
+      <div class="expo-text">
+        "你有没有想过，你每天上班的<em>九个小时</em>，你的猫在做什么？它是猎手，但家里没有猎物。中国 <em>41%</em> 的室内猫已经超重——不是吃太多，是因为没有猎物。我们做了一个<em>会逃跑的机器人</em>。来，把手伸过去抓它。"
+      </div>
+      <div class="expo-note">关键动作：让评委现场体验躲闪。机械臂的瞬间反应是任何 PPT 都替代不了的视觉冲击。</div>
+    </div>
+
+    <table class="data-table" style="margin-top:32px">
+      <thead>
+        <tr><th>时间</th><th>内容</th><th>核心目标</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono neon-text">0–1 min</td><td><strong>痛点故事</strong>：从"九个小时猫在做什么"切入，抛出 41% 超重数据</td><td class="good">情感共鸣</td></tr>
+        <tr><td class="mono neon-text">1–3 min</td><td><strong>现场演示</strong>：评委伸手 → 机械臂躲开；展示 AI 日记样例</td><td class="good">视觉冲击</td></tr>
+        <tr><td class="mono neon-text">3–5 min</td><td><strong>技术深度</strong>：惊喜熵引擎 · 非语言感知 · 生物学闭环</td><td class="good">技术信服</td></tr>
+        <tr><td class="mono neon-text">5–6 min</td><td><strong>商业逻辑</strong>：LTV/CAC 15x，"用户不能换设备"——时间站在我们这边</td><td class="good">投资者钩子</td></tr>
+        <tr><td class="mono neon-text">6–7 min</td><td><strong>更大的图景</strong>：AI for the Inarticulate——从猫到 2.8亿老人</td><td class="good">想象空间</td></tr>
+        <tr><td class="mono neon-text">7–8 min</td><td><strong>记忆盒子</strong>："Hunter 会记得它生命的每一天"——收尾</td><td class="good">情感关闭</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- RISKS -->
+<section id="risks">
+  <div class="container">
+    <div class="section-tag">09 — Risk Register</div>
+    <h2 class="section-title">Known risks, <span>prepared</span> responses</h2>
+
+    <table class="risk-table">
+      <thead>
+        <tr><th>风险</th><th>概率</th><th>应对方案</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>YOLO 检测延迟影响体验</td>
+          <td class="risk-mid">中</td>
+          <td>赛前测试推理速度，用 YOLOv8 nano；备用：纯运动检测降级模式（无需模型，&lt;5ms）</td>
+        </tr>
+        <tr>
+          <td>机械臂在演示中异常</td>
+          <td class="risk-low">低</td>
+          <td>提前录制完整演示视频作为 fallback；现场双机备份</td>
+        </tr>
+        <tr>
+          <td>评委觉得"就是个逗猫机器人"</td>
+          <td class="risk-mid">中</td>
+          <td>展示竞争格局表，重点打惊喜熵引擎和非语言感知；展示技术栈平移到老人/婴儿的路线图</td>
+        </tr>
+        <tr>
+          <td>评委问"为什么不做狗"</td>
+          <td class="risk-low">低</td>
+          <td>"V1不做，因为狗的运动尺度和猫差异太大，做不好两边都伤。<strong>聚焦比宽泛更有力量。</strong>"</td>
+        </tr>
+        <tr>
+          <td>投食机构现场卡顿</td>
+          <td class="risk-low">低</td>
+          <td>演示中用手动投食替代，聚焦算法展示；硬件问题不影响 AI 部分评分</td>
+        </tr>
+        <tr>
+          <td>数据来源被质疑</td>
+          <td class="risk-low">低</td>
+          <td>所有数据标注来源（艾媒、华泰、AVMA、ISFM），可当场出示原文链接</td>
+        </tr>
+        <tr>
+          <td>YOLO 推理延迟 &gt;150ms</td>
+          <td class="risk-mid">中</td>
+          <td>预加载模型到内存；开启 TFLite INT8 量化；最差情况降帧到 15fps 保住跟随效果</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="sep"></div>
+
 <!-- QUOTES -->
 <section id="quotes">
   <div class="container">
-    <div class="section-tag">08 — Pitch Lines</div>
-    <h2 class="section-title">Words that <span>land</span></h2>
+    <div class="section-tag">10 — Pitch Lines</div>
+    <h2 class="section-title">Seven lines that <span>don't let go</span></h2>
+    <p class="section-desc">按被记住度排序，挑 3–4 句进 Pitch。每句都是一把锁，对应评委脑中的一个钩子。</p>
 
     <div class="quotes-grid">
       <div class="quote-card">
-        <div class="quote-text">你的猫不是懒，是被无聊逼成了懒。Hunter 是它等了十年的同伴。</div>
-        <div class="quote-sub">Opening Hook</div>
+        <div class="quote-text">这不是给猫的玩具。这是给猫的<strong style="color:var(--cyan)">同事</strong>。</div>
+        <div class="quote-sub">Opening · 重新定义品类</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">所有竞品都是定时程序，Hunter 是唯一一个能真正感知猫、记住猫、进化的系统。</div>
-        <div class="quote-sub">Differentiation</div>
+        <div class="quote-text">我们教 AI 学会了<strong style="color:var(--cyan)">惊喜</strong>。</div>
+        <div class="quote-sub">Tech Thesis · 最短最有力</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">不是玩具，是具身智能的最小完备体。</div>
-        <div class="quote-sub">Positioning</div>
+        <div class="quote-text">你不在的 9 小时，<strong style="color:var(--cyan)">不再是空白</strong>。</div>
+        <div class="quote-sub">Emotional · 直击分离焦虑</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">LTV/CAC = 15x。宠物赛道最高单位经济模型之一。</div>
-        <div class="quote-sub">Investor Hook</div>
+        <div class="quote-text">这是第一台为<strong style="color:var(--cyan)">不会说话的存在</strong>做的 AI。</div>
+        <div class="quote-sub">Positioning · 赛道差异化</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">惊喜熵引擎：用信息论打败习惯化，让猫永远对下一秒保持好奇。</div>
-        <div class="quote-sub">Tech Thesis</div>
+        <div class="quote-text">出厂时它们一样。6 个月后，<strong style="color:var(--cyan)">每一台都不同</strong>。</div>
+        <div class="quote-sub">Moat · 护城河可视化</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">Hunter 不只是看着你的猫——它在理解你的猫，并为它定制每一天。</div>
-        <div class="quote-sub">Emotional Close</div>
+        <div class="quote-text">Hunter 会记得它生命的<strong style="color:var(--cyan)">每一天</strong>。</div>
+        <div class="quote-sub">Close · 全场安静的那句话</div>
       </div>
       <div class="quote-card">
-        <div class="quote-text">¥2793亿市场，没有一个玩家拥有视觉感知。我们来了。</div>
-        <div class="quote-sub">Market Entry</div>
+        <div class="quote-text">中国 41% 的室内猫已经超重——不是吃太多，是因为<strong style="color:var(--red)">没有猎物</strong>。</div>
+        <div class="quote-sub">Data Hook · 让数据有重量</div>
       </div>
     </div>
   </div>
@@ -1388,15 +1735,20 @@ function animCounter(el){
     if(cur>=target)clearInterval(t);
   },20);
 }
+const animated=new Set();
+function maybeAnimate(el){
+  if(animated.has(el))return;
+  animated.add(el);
+  animCounter(el);
+}
 const io=new IntersectionObserver(entries=>{
-  entries.forEach(e=>{
-    if(e.isIntersecting){
-      animCounter(e.target);
-      io.unobserve(e.target);
-    }
-  });
-},{threshold:.5});
-document.querySelectorAll('[data-target]').forEach(el=>io.observe(el));
+  entries.forEach(e=>{if(e.isIntersecting){maybeAnimate(e.target);io.unobserve(e.target);}});
+},{threshold:0.05});
+document.querySelectorAll('[data-target]').forEach(el=>{
+  const r=el.getBoundingClientRect();
+  if(r.top<window.innerHeight&&r.bottom>0) maybeAnimate(el);
+  else io.observe(el);
+});
 
 // ── 3D CARD TILT ─────────────────────────────────────────────────
 document.addEventListener('mousemove',e=>{
