@@ -1507,6 +1507,8 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 }
 .cam-hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
 .cam-hud rect.hud-bar.hot{animation:flicker .35s infinite}
+/* REAR CAM 镜像:cam-img 水平翻转;bbox 由 JS 反转 x 坐标(保留文字方向);HUD/corner 不动 */
+.cam-frame.mirror .cam-img{transform:scaleX(-1)}
 .cam-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;display:block;z-index:1}
 .cam-corner{position:absolute;width:14px;height:14px;border:1.5px solid var(--amber);z-index:4;opacity:.85}
 .cam-corner.tl{top:4px;left:4px;border-right:none;border-bottom:none}
@@ -1702,6 +1704,14 @@ svg.schem{width:100%;height:100%;display:block}
         <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
         <div class="cam-rec"><div class="recdot"></div>LIVE</div>
         <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
+      </div>
+
+      <div class="btn-row btn-2">
+        <button class="btn" id="btnMirror"><span>⟷ REAR CAM</span><span class="badge" id="mirrorBadge">OFF</span></button>
+        <div class="stat-card" style="text-align:left">
+          <div class="stat-label">VIEW</div>
+          <div class="stat-val" style="font-size:13px" id="viewLabel">VEHICLE</div>
+        </div>
       </div>
 
       <div>
@@ -2074,14 +2084,48 @@ svg.schem{width:100%;height:100%;display:block}
     $('#uptime').textContent = `${hh}:${mm}:${ss}`;
   }, 500);
 
+  // ============ REAR CAM mode (摄像头朝车后方装的视角校正) ============
+  // 开启时:视频水平镜像;WASD W↔S 反转、QE 反转、AD 保持;YOLO bbox 也镜像 x
+  // 让用户的 FPS 直觉(按 W 画面里东西靠近)跟实际车控制对应起来
+  let rearMode = localStorage.getItem('rearMode') === 'true';
+  function applyRearMode(){
+    const frame = document.querySelector('.cam-frame');
+    if (frame) frame.classList.toggle('mirror', rearMode);
+    const btn = $('#btnMirror');
+    if (btn) btn.classList.toggle('on', rearMode);
+    const badge = $('#mirrorBadge');
+    if (badge) badge.textContent = rearMode ? 'ON' : 'OFF';
+    const lbl = $('#viewLabel');
+    if (lbl) lbl.textContent = rearMode ? 'CAMERA' : 'VEHICLE';
+  }
+  function toggleRearMode(){
+    // 切换前先停止所有 hold,避免 stopHold(反转后) 找不到 timer 残留
+    pressed.forEach((action, k) => { stopHold(action); highlightKey(k, false); });
+    pressed.clear();
+    rearMode = !rearMode;
+    localStorage.setItem('rearMode', String(rearMode));
+    applyRearMode();
+  }
+
   // ============ Hold-to-move ============
-  const moveMap = {
+  const moveMapNormal = {
     'w':'forward','arrowup':'forward',
     's':'backward','arrowdown':'backward',
     'a':'left','arrowleft':'left',
     'd':'right','arrowright':'right',
     'q':'rotate_ccw','e':'rotate_cw',
   };
+  const moveMapRear = {
+    // 反转 W↔S 让"按 W 画面里东西靠近"
+    'w':'backward','arrowup':'backward',
+    's':'forward','arrowdown':'forward',
+    // A/D 配合水平镜像后已经对了
+    'a':'left','arrowleft':'left',
+    'd':'right','arrowright':'right',
+    // 反转 Q↔E 让旋转方向跟画面世界滚动方向一致
+    'q':'rotate_cw','e':'rotate_ccw',
+  };
+  function moveMap(){ return rearMode ? moveMapRear : moveMapNormal; }
   const HOLD_MS = 100;
   const holdTimers = {};
   function startHold(action){
@@ -2096,16 +2140,17 @@ svg.schem{width:100%;height:100%;display:block}
   }
 
   // ============ Keyboard ============
-  const pressed = new Set();
+  const pressed = new Map();  // key -> action(根据 rearMode 决定的实际 cmd)
   let recording = false;
   document.addEventListener('keydown', ev => {
     if (ev.repeat) return;
     if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
     const k = ev.key.toLowerCase();
-    if (moveMap[k]){
+    const action = moveMap()[k];
+    if (action){
       if (pressed.has(k)) return;
-      pressed.add(k);
-      startHold(moveMap[k]); highlightKey(k, true);
+      pressed.set(k, action);
+      startHold(action); highlightKey(k, true);
       ev.preventDefault(); return;
     }
     switch(k){
@@ -2127,11 +2172,16 @@ svg.schem{width:100%;height:100%;display:block}
   });
   document.addEventListener('keyup', ev => {
     const k = ev.key.toLowerCase();
-    if (moveMap[k] && pressed.has(k)){ pressed.delete(k); stopHold(moveMap[k]); highlightKey(k, false); }
+    if (pressed.has(k)){
+      const action = pressed.get(k);
+      pressed.delete(k);
+      stopHold(action);
+      highlightKey(k, false);
+    }
     if (k === 'r') stopRec();
   });
   window.addEventListener('blur', () => {
-    pressed.forEach(k => { stopHold(moveMap[k]); highlightKey(k, false); });
+    pressed.forEach((action, k) => { stopHold(action); highlightKey(k, false); });
     pressed.clear();
     stopRec();
   });
@@ -2151,11 +2201,25 @@ svg.schem{width:100%;height:100%;display:block}
     if (el) el.classList.toggle('active', on);
   }
 
-  // ============ Mouse/touch keys ============
+  // ============ Mouse/touch keys (rearMode 时反转 W/S 和 Q/E) ============
+  const rearActionMap = {
+    forward: 'backward', backward: 'forward',
+    rotate_ccw: 'rotate_cw', rotate_cw: 'rotate_ccw',
+    left: 'left', right: 'right',
+  };
   $$('.key[data-press]').forEach(el => {
-    const action = el.dataset.press;
-    const down = ev => { ev.preventDefault(); startHold(action); el.classList.add('active'); };
-    const up   = ev => { stopHold(action); el.classList.remove('active'); };
+    let currentHoldAction = null;
+    const resolve = () => rearMode ? (rearActionMap[el.dataset.press] || el.dataset.press) : el.dataset.press;
+    const down = ev => {
+      ev.preventDefault();
+      currentHoldAction = resolve();
+      startHold(currentHoldAction);
+      el.classList.add('active');
+    };
+    const up = () => {
+      if (currentHoldAction){ stopHold(currentHoldAction); currentHoldAction = null; }
+      el.classList.remove('active');
+    };
     el.addEventListener('mousedown', down);
     el.addEventListener('mouseup', up);
     el.addEventListener('mouseleave', up);
@@ -2163,6 +2227,10 @@ svg.schem{width:100%;height:100%;display:block}
     el.addEventListener('touchend', up);
     el.addEventListener('touchcancel', up);
   });
+
+  // REAR CAM toggle 按钮(无键盘快捷键,避免跟 m=speed_reset / 字母键冲突)
+  $('#btnMirror').addEventListener('click', () => toggleRearMode());
+  applyRearMode();  // 初始化 UI 反映 localStorage 状态
 
   // ============ Action buttons ============
   $$('button.btn[data-action]').forEach(el => {
@@ -2454,7 +2522,12 @@ svg.schem{width:100%;height:100%;display:block}
     const VW = 400, VH = 300;
     let html = '';
     dets.forEach(d => {
-      const x = d.x * VW, y = d.y * VH, w = d.w * VW, h = d.h * VH;
+      let x = d.x * VW;
+      const y = d.y * VH;
+      const w = d.w * VW;
+      const h = d.h * VH;
+      // REAR CAM 镜像模式:bbox 跟 cam-img 一起水平翻转(图像里物体位置变了)
+      if (rearMode) x = VW - x - w;
       const c = yoloColor(d.cls);
       const text = `${d.label} ${Math.round(d.conf * 100)}`;
       const tw = Math.min(VW - x, text.length * 6 + 8);
