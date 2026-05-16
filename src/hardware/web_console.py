@@ -2721,9 +2721,9 @@ svg.schem{width:100%;height:100%;display:block}
     // 反转 W↔S 让"按 W 画面里东西靠近"
     'w':'backward','arrowup':'backward',
     's':'forward','arrowdown':'forward',
-    // A/D 配合水平镜像后已经对了
-    'a':'left','arrowleft':'left',
-    'd':'right','arrowright':'right',
+    // 反转 A↔D:cam 朝后 + 画面 scaleX(-1) 镜像后,用户感知的"画面左滑"= 车体物理右移
+    'a':'right','arrowleft':'right',
+    'd':'left','arrowright':'left',
     // 反转 Q↔E 让旋转方向跟画面世界滚动方向一致
     'q':'rotate_cw','e':'rotate_ccw',
   };
@@ -2754,7 +2754,9 @@ svg.schem{width:100%;height:100%;display:block}
     clearInterval(holdRenewers[action]);
     delete holdRenewers[action];
     if (Object.keys(holdRenewers).length === 0){
+      // 双通道 stop:WS 抖动时 HTTP 路径有时更快;两条都到 release 也只发一次 car.stop()
       wsSend({type:'hold', state:'up'});
+      try{ navigator.sendBeacon('/api/cmd/stop'); }catch(e){}
     }
   }
 
@@ -2831,7 +2833,7 @@ svg.schem{width:100%;height:100%;display:block}
   const rearActionMap = {
     forward: 'backward', backward: 'forward',
     rotate_ccw: 'rotate_cw', rotate_cw: 'rotate_ccw',
-    left: 'left', right: 'right',
+    left: 'right', right: 'left',
   };
   $$('.key[data-press]').forEach(el => {
     let currentHoldAction = null;
@@ -3467,7 +3469,6 @@ svg.schem{width:100%;height:100%;display:block}
           });
         }
         // 更新 joint values
-        const grid = $('#armJointGrid');
         if (grid){
           for (const [name, deg] of Object.entries(s.present_positions_deg)){
             const el = grid.querySelector(`[data-joint="${name}"]`);
