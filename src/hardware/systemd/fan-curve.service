@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply aggressive fan trip points (RPi 5 cooling_fan)
+After=multi-user.target
+ConditionPathExists=/sys/class/thermal/thermal_zone0/trip_point_4_temp
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash -c 'echo 40000 > /sys/class/thermal/thermal_zone0/trip_point_1_temp && echo 45000 > /sys/class/thermal/thermal_zone0/trip_point_2_temp && echo 55000 > /sys/class/thermal/thermal_zone0/trip_point_3_temp && echo 65000 > /sys/class/thermal/thermal_zone0/trip_point_4_temp'
+
+[Install]
+WantedBy=multi-user.target
