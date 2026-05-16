@@ -405,35 +405,42 @@ class HoldController:
     TIMEOUT_S = 1.5
 
     def __init__(self):
-        self.current_action: str | None = None
-        self.last_renew_t = 0.0
+        # action → last_renew_t,支持多键同时 hold;_loop 在它们之间 round-robin 发 cmd
+        # (yahboom 协议是单字符互斥指令,无法原生组合,软件 RR 近似 W+Q 这种"边走边转"语义)
+        self.actions: dict[str, float] = {}
         self.thread: threading.Thread | None = None
         self.lock = threading.Lock()
-        self._stop_event = threading.Event()
+        self._rr_idx = 0
 
     def hold(self, action: str):
         with self.lock:
-            self.current_action = action
-            self.last_renew_t = time.time()
+            self.actions[action] = time.time()
             if self.thread is None or not self.thread.is_alive():
-                self._stop_event.clear()
                 self.thread = threading.Thread(target=self._loop, daemon=True)
                 self.thread.start()
 
     def renew(self, action: str | None = None):
         with self.lock:
-            if action is None or self.current_action == action:
-                self.last_renew_t = time.time()
+            now = time.time()
+            if action is None:
+                for k in self.actions: self.actions[k] = now
+            elif action in self.actions:
+                self.actions[action] = now
 
-    def release(self, reason: str = "up"):
+    def release(self, action: str | None = None, reason: str = "up"):
+        # action 给定 → 单独移除该键(剩余 action 继续 RR);None → 全清 + 停车
         with self.lock:
-            had = self.current_action
-            self.current_action = None
-        if had is not None:
+            if action is None:
+                had_any = bool(self.actions)
+                self.actions.clear()
+            else:
+                had_any = self.actions.pop(action, None) is not None
+            empty = not self.actions
+        if had_any and empty:
             try:
                 if car is not None: car.stop()
             except Exception: pass
-            push_log(f"hold release ({reason}): was {had}", "cmd")
+            push_log(f"hold release ({reason})", "cmd")
 
     def _loop(self):
         action_fns = {
@@ -444,20 +451,25 @@ class HoldController:
             "rotate_cw":  "rotate_cw",
             "rotate_ccw": "rotate_ccw",
         }
-        # 绝对时间步进 — 让间隔精确到每次 REPEAT_MS,不受 car.method() 耗时影响
-        # 之前 time.sleep(0.1) 是相对 sleep,如果 method 耗时 20ms 实际 cycle 120ms,
-        # 多次循环下 ESP32 收到的 cmd 数量浮动 → 转弯/前进距离不一致
         interval = self.REPEAT_MS / 1000.0
         next_t = time.monotonic()
         while True:
             with self.lock:
-                action = self.current_action
-                age = time.time() - self.last_renew_t
-            if action is None:
+                now = time.time()
+                # 清 timeout 的 action
+                for k in list(self.actions.keys()):
+                    if now - self.actions[k] > self.TIMEOUT_S:
+                        del self.actions[k]
+                keys = list(self.actions.keys())
+            if not keys:
+                # 全部松开/超时,停车后退出 loop
+                try:
+                    if car is not None: car.stop()
+                except Exception: pass
                 break
-            if age > self.TIMEOUT_S:
-                self.release(reason=f"timeout {age:.1f}s")
-                break
+            # round-robin:多键时每 100ms 切换发不同 cmd,单键时只发它自己
+            action = keys[self._rr_idx % len(keys)]
+            self._rr_idx += 1
             try:
                 if car is not None:
                     method_name = action_fns.get(action)
@@ -470,8 +482,260 @@ class HoldController:
             if sleep_dur > 0:
                 time.sleep(sleep_dur)
             else:
-                # cycle 严重落后(可能 GC / system load),重置以避免补偿性 burst
                 next_t = time.monotonic()
+
+
+# ====================== Recording / Playback ======================
+# 内存录制用户操作(cmd / hold 边沿)+ 传感器快照(ultra @ 10Hz, pose);支持正/倒放,
+# 进度/当前指令显示,以及"校准 visualization":回放时把录制时的 ultra/pose 跟实时数据
+# 推送给前端对比展示(自动微调 hold 时长留 Phase 2)。memory-only,服务重启清空。
+
+class RecordingController:
+    MAX_DURATION_S = 600   # 10 min 上限
+    SENSOR_HZ = 10
+    # cmd 倒放反映射(自反的写自己,音效不可逆但仍播放原音)
+    INVERSE = {
+        "forward": "backward", "backward": "forward",
+        "left":    "right",    "right":    "left",
+        "rotate_cw": "rotate_ccw", "rotate_ccw": "rotate_cw",
+        "speed_up": "speed_down", "speed_down": "speed_up",
+        "speed_reset": "speed_reset",
+        "obstacle_on": "obstacle_off", "obstacle_off": "obstacle_on",
+        "ultra_on": "ultra_off", "ultra_off": "ultra_on",
+        "emergency": "emergency", "stop": "stop",
+        "cat1": "cat1", "cat2": "cat2", "cat3": "cat3", "cat4": "cat4",
+    }
+
+    def __init__(self):
+        self.events: list[tuple[float, str, dict]] = []
+        self.t0 = 0.0
+        self.recording = False
+        self.playing = False
+        self.playback = {
+            "idx": 0, "total": 0, "elapsed": 0.0, "duration": 0.0,
+            "direction": "forward", "speed": 1.0,
+            "current": None, "calibrate": False,
+            "trail_recorded": [], "trail_replay": [],
+            "ultra_recorded": None, "ultra_live": None, "ultra_diff_mm": None,
+        }
+        self.lock = threading.Lock()
+        self.sensor_thread = None
+        self.playback_thread = None
+
+    def status(self):
+        with self.lock:
+            duration = self.events[-1][0] if self.events else 0.0
+            cmd_count = sum(1 for _, k, _ in self.events if k != "sensor")
+            return {
+                "recording": self.recording,
+                "playing": self.playing,
+                "event_count": cmd_count,
+                "total_events": len(self.events),
+                "duration_s": round(duration, 2),
+                "elapsed_s": round(time.monotonic() - self.t0, 2) if self.recording else 0.0,
+                "playback": dict(self.playback) if self.playing else None,
+            }
+
+    def start(self):
+        with self.lock:
+            if self.recording or self.playing: return (False, "already busy")
+            self.events.clear()
+            self.t0 = time.monotonic()
+            self.recording = True
+            self.sensor_thread = threading.Thread(target=self._sensor_loop, daemon=True)
+            self.sensor_thread.start()
+        push_log("recording started", "rec")
+        return (True, None)
+
+    def stop_recording(self):
+        with self.lock:
+            if not self.recording: return (False, "not recording")
+            self.recording = False
+            n = len(self.events)
+            d = self.events[-1][0] if self.events else 0.0
+        push_log(f"recording stopped: {n} events, {d:.1f}s", "rec")
+        return (True, None)
+
+    def clear(self):
+        with self.lock:
+            if self.recording or self.playing: return (False, "busy")
+            self.events.clear()
+        return (True, None)
+
+    def log_event(self, kind: str, payload: dict):
+        with self.lock:
+            if not self.recording: return
+            t = time.monotonic() - self.t0
+            if t > self.MAX_DURATION_S:
+                self.recording = False
+                push_log("recording auto-stopped: max duration", "rec")
+                return
+            self.events.append((t, kind, payload))
+
+    def _sensor_loop(self):
+        interval = 1.0 / self.SENSOR_HZ
+        next_t = time.monotonic()
+        while True:
+            with self.lock:
+                if not self.recording: break
+                t0 = self.t0
+            t = time.monotonic() - t0
+            ultra_raw = state.get("ultra") or {}
+            ultra_dist = {}
+            for k, v in ultra_raw.items():
+                if isinstance(v, dict): ultra_dist[str(k)] = v.get("distance_mm")
+            pose = None
+            if minimap is not None:
+                with minimap.lock:
+                    pose = {"x": round(minimap.x_mm, 1), "y": round(minimap.y_mm, 1),
+                            "theta": round(minimap.theta, 4)}
+            snap = {"ultra": ultra_dist, "pose": pose, "speed": state.get("speed")}
+            with self.lock:
+                if self.recording: self.events.append((t, "sensor", snap))
+            next_t += interval
+            sleep_dur = next_t - time.monotonic()
+            if sleep_dur > 0: time.sleep(sleep_dur)
+            else: next_t = time.monotonic()
+
+    def play(self, direction: str = "forward", speed: float = 1.0, calibrate: bool = False):
+        with self.lock:
+            if self.recording or self.playing: return (False, "busy")
+            if not self.events: return (False, "no recording")
+            events_snap = list(self.events)
+            duration = events_snap[-1][0]
+            trail_rec = [e[2]["pose"] for e in events_snap if e[1] == "sensor" and e[2].get("pose")]
+            self.playing = True
+            self.playback = {
+                "idx": 0, "total": sum(1 for _, k, _ in events_snap if k != "sensor"),
+                "elapsed": 0.0, "duration": duration,
+                "direction": direction, "speed": max(0.1, min(5.0, float(speed))),
+                "current": None, "calibrate": bool(calibrate),
+                "trail_recorded": trail_rec, "trail_replay": [],
+                "ultra_recorded": None, "ultra_live": None, "ultra_diff_mm": None,
+            }
+            self.playback_thread = threading.Thread(target=self._playback_loop, args=(events_snap,), daemon=True)
+            self.playback_thread.start()
+        push_log(f"playback started: {direction} x{speed}{' +cal' if calibrate else ''}", "rec")
+        return (True, None)
+
+    def stop_playback(self):
+        with self.lock:
+            if not self.playing: return (False, "not playing")
+            self.playing = False
+        try:
+            if holder is not None: holder.release()
+            if car is not None: car.stop()
+        except Exception: pass
+        push_log("playback stopped", "rec")
+        return (True, None)
+
+    def _prepare(self, events, direction):
+        # 过滤掉 sensor,只保留 cmd 类
+        cmd_only = [(t, k, p) for t, k, p in events if k != "sensor"]
+        if direction != "reverse":
+            return cmd_only
+        duration = events[-1][0] if events else 0
+        out = []
+        for t, k, p in reversed(cmd_only):
+            t_r = duration - t
+            action = p.get("action") if isinstance(p, dict) else None
+            inv = self.INVERSE.get(action, action) if action else None
+            new_p = {"action": inv} if action else (p or {})
+            # hold_down <-> hold_up 互换(因为反着走时间)
+            if k == "hold_down":
+                out.append((t_r, "hold_up", new_p))
+            elif k == "hold_up":
+                out.append((t_r, "hold_down", new_p))
+            else:
+                out.append((t_r, k, new_p))
+        return out
+
+    def _playback_loop(self, events_snap):
+        with self.lock:
+            direction = self.playback["direction"]
+            speed = self.playback["speed"]
+            calibrate = self.playback["calibrate"]
+        prepared = self._prepare(events_snap, direction)
+        sensor_log = [(t, p) for t, k, p in events_snap if k == "sensor"]
+
+        def find_sensor(t_orig):
+            # 二分查找 sensor 时间最近邻
+            if not sensor_log: return None
+            best = sensor_log[0]; best_d = abs(sensor_log[0][0] - t_orig)
+            for s in sensor_log:
+                d = abs(s[0] - t_orig)
+                if d < best_d: best = s; best_d = d
+            return best[1]
+
+        start = time.monotonic()
+        i = 0
+        try:
+            while i < len(prepared):
+                with self.lock:
+                    if not self.playing: break
+                t_ev, kind, payload = prepared[i]
+                target = start + t_ev / speed
+                now = time.monotonic()
+                if target > now: time.sleep(target - now)
+                with self.lock:
+                    if not self.playing: break
+                self._dispatch(kind, payload)
+                # 校准 visualization:取原录时 t_ev 对应 sensor,跟实时 sensor 对比
+                cal_data = None
+                if calibrate:
+                    orig_t = events_snap[-1][0] - t_ev if direction == "reverse" else t_ev
+                    rec_snap = find_sensor(orig_t)
+                    if rec_snap:
+                        live_ultra = {}
+                        for k, v in (state.get("ultra") or {}).items():
+                            if isinstance(v, dict): live_ultra[str(k)] = v.get("distance_mm")
+                        rec_ultra = rec_snap.get("ultra") or {}
+                        diff = {}
+                        for sk in set(list(rec_ultra.keys()) + list(live_ultra.keys())):
+                            r = rec_ultra.get(sk); l = live_ultra.get(sk)
+                            if r is not None and l is not None:
+                                diff[sk] = l - r
+                        cal_data = {"recorded": rec_ultra, "live": live_ultra, "diff": diff}
+                with self.lock:
+                    self.playback["idx"] = i + 1
+                    self.playback["elapsed"] = t_ev
+                    self.playback["current"] = {"kind": kind, "action": payload.get("action") if isinstance(payload, dict) else None}
+                    if minimap is not None:
+                        with minimap.lock:
+                            self.playback["trail_replay"].append({"x": round(minimap.x_mm, 1), "y": round(minimap.y_mm, 1)})
+                    if cal_data:
+                        self.playback["ultra_recorded"] = cal_data["recorded"]
+                        self.playback["ultra_live"] = cal_data["live"]
+                        self.playback["ultra_diff_mm"] = cal_data["diff"]
+                i += 1
+        finally:
+            try:
+                if holder is not None: holder.release()
+                if car is not None: car.stop()
+            except Exception: pass
+            with self.lock:
+                self.playing = False
+                self.playback["current"] = None
+            push_log("playback finished", "rec")
+
+    def _dispatch(self, kind, payload):
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if not action: return
+        try:
+            if kind == "hold_down":
+                if holder: holder.hold(action)
+            elif kind == "hold_up":
+                if holder: holder.release(action)
+            elif kind == "hold_renew":
+                if holder: holder.renew(action)
+            elif kind == "cmd":
+                fn = CMD_MAP.get(action)
+                if fn: fn()
+        except Exception as e:
+            push_log(f"playback dispatch err {kind}/{action}: {e}", "rec")
+
+
+recorder: "RecordingController" = None  # type: ignore
 
 
 # ====================== YOLO inference ======================
@@ -877,9 +1141,10 @@ def install_event_hooks():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global car, audio, camera, yolo, minimap, holder, loop
+    global car, audio, camera, yolo, minimap, holder, recorder, loop
     loop = asyncio.get_running_loop()
     holder = HoldController()
+    recorder = RecordingController()
 
     push_log("boot: initializing CarController", "sys")
     car = None
@@ -1085,12 +1350,22 @@ async def lifespan(app: FastAPI):
             except Exception: pass
     _mm_task = asyncio.create_task(_minimap_pusher())
 
+    # WS push recorder state every 200ms (录制/回放进度;静默时也 push 让 UI 状态同步)
+    async def _recorder_pusher():
+        while True:
+            await asyncio.sleep(0.2)
+            if not clients or recorder is None: continue
+            try: await _broadcast({"type": "rec", "data": recorder.status()})
+            except Exception: pass
+    _rec_task = asyncio.create_task(_recorder_pusher())
+
     push_log("system online", "sys")
     yield
     push_log("system shutdown", "sys")
     _mm_task.cancel()
     _rt_task.cancel()
     _ka_task.cancel()
+    _rec_task.cancel()
 
     # 每个 obj.close() 包到独立 thread,5s timeout,防止某个 close 阻塞 → SIGKILL → 留 driver state 尾巴
     def _safe_close(obj, name):
@@ -1509,6 +1784,7 @@ async def cmd(action: str, duration: float = 0, distance: float = 0, angle: floa
     except Exception as e:
         push_log(f"cmd error: {action}: {e}", "sys")
         raise HTTPException(500, str(e))
+    if recorder is not None: recorder.log_event("cmd", {"action": action})
     return {"ok": True, "action": action, "mode": "single"}
 
 
@@ -1526,6 +1802,59 @@ async def map_reset():
         raise HTTPException(503, "minimap not initialized")
     minimap.reset()
     push_log("minimap reset", "sys")
+    return {"ok": True}
+
+
+@app.get("/api/rec/status", tags=["rec"], summary="录制 / 回放状态")
+async def rec_status():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    return recorder.status()
+
+
+@app.post("/api/rec/start", tags=["rec"], summary="开始录制 - 清空已有事件",
+          description="录制 cmd + hold_down/hold_up + 10Hz 传感器快照(ultra/pose/speed)。仅内存,服务重启清空。10 分钟上限。")
+async def rec_start():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.start()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/stop", tags=["rec"], summary="停止录制")
+async def rec_stop():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.stop_recording()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True, "status": recorder.status()}
+
+
+@app.post("/api/rec/clear", tags=["rec"], summary="清空录制(仅在 idle 时)")
+async def rec_clear():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.clear()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/play", tags=["rec"], summary="开始回放",
+          description=("query params:\n"
+                       "- `direction`: `forward`(默认)/`reverse`\n"
+                       "- `speed`: 0.1 - 5.0 倍速\n"
+                       "- `calibrate`: 1 启用校准 visualization(回放时推送录制 vs 实时 ultra 偏差)\n"))
+async def rec_play(direction: str = "forward", speed: float = 1.0, calibrate: int = 0):
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    if direction not in ("forward", "reverse"):
+        raise HTTPException(400, "direction must be forward or reverse")
+    ok, err = recorder.play(direction=direction, speed=speed, calibrate=bool(calibrate))
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/stop_playback", tags=["rec"], summary="终止回放")
+async def rec_stop_playback():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.stop_playback()
+    if not ok: raise HTTPException(409, err)
     return {"ok": True}
 
 
@@ -1896,10 +2225,14 @@ async def ws_endpoint(websocket: WebSocket):
                     act = m.get("action")
                     if st == "down" and act:
                         holder.hold(act)
+                        if recorder is not None: recorder.log_event("hold_down", {"action": act})
                     elif st == "renew":
                         holder.renew(act)
+                        # renew 不录(高频且对回放无信息量,playback 内部会自行 renew)
                     elif st == "up":
-                        holder.release()
+                        # 带 act = 单键释放(剩余 action 继续 RR);不带 = 全清(兜底)
+                        holder.release(act)
+                        if recorder is not None: recorder.log_event("hold_up", {"action": act})
             except Exception:
                 pass
     except WebSocketDisconnect:
@@ -1981,6 +2314,26 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
   color:var(--text-dim);font-family:var(--font-mono);font-size:9px;letter-spacing:.15em;
   padding:2px 8px;cursor:pointer;text-transform:uppercase;height:18px}
 .map-reset-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.06)}
+
+/* Recording panel */
+.rec-progress-row{display:flex;align-items:center;gap:8px}
+.rec-progress-track{flex:1;height:4px;background:#1a1610;border:1px solid var(--line2);position:relative;overflow:hidden}
+.rec-progress-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#ffb000,#ff8800);width:0%;transition:width .15s}
+.rec-progress-meta{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em;min-width:90px;text-align:right}
+.rec-current{font-family:var(--font-mono);font-size:11px;color:var(--amber);letter-spacing:.18em;padding:4px 8px;
+  background:rgba(255,176,0,.07);border-left:2px solid var(--amber);text-transform:uppercase}
+.cal-toggle{display:flex;align-items:center;gap:8px;margin-top:8px;font-family:var(--font-mono);
+  font-size:10px;color:var(--text-dim);letter-spacing:.15em;text-transform:uppercase;cursor:pointer}
+.cal-toggle input{margin:0;accent-color:var(--amber)}
+.rec-cal-diff{margin-top:6px;font-family:var(--font-mono);font-size:10px}
+.rec-cal-row{display:grid;grid-template-columns:40px 1fr 1fr 1fr;gap:6px;padding:2px 0;color:var(--text-dim);align-items:center}
+.rec-cal-row>span:first-child{color:var(--amber);letter-spacing:.1em}
+.rec-cal-row>span:nth-child(2){color:#5af0ff}
+.rec-cal-row>span:nth-child(3){color:#7fff5a}
+.rec-cal-row>span:last-child{color:var(--text-bright);text-align:right;font-variant-numeric:tabular-nums}
+#btnRecToggle.recording{background:rgba(255,58,46,.15);border-color:#ff3a2e;color:#ff7a6e}
+#btnRecToggle.recording::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff3a2e;margin-right:6px;animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .panel-body{padding:12px;flex:1;overflow:hidden;position:relative;display:flex;flex-direction:column;gap:10px}
 
 header{grid-area:head;background:linear-gradient(90deg,#1a1410,#15110b 50%,#1a1410);
@@ -2301,6 +2654,9 @@ svg.schem{width:100%;height:100%;display:block}
 
           <!-- Mini-map world layers (动态由 JS 渲染,ego-centric: 车在 (200,200) 朝上) -->
           <polyline id="worldTrail" fill="none" stroke="#5af0ff" stroke-width="1.2" stroke-opacity="0.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- 回放叠加层:录制时轨迹(灰虚)+ 回放时实际轨迹(亮青) -->
+          <polyline id="recordedTrail" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.7" stroke-linecap="round"/>
+          <polyline id="replayTrail" fill="none" stroke="#ffb000" stroke-width="1.8" stroke-opacity="0.95" stroke-linecap="round"/>
           <g id="worldOcc"></g>
           <g id="worldHits"></g>
           <g id="originMarker" style="display:none">
@@ -2374,6 +2730,7 @@ svg.schem{width:100%;height:100%;display:block}
       INPUT DECK
       <button class="tab-btn active" data-tab="drive">DRIVE</button>
       <button class="tab-btn" data-tab="arm">ARM</button>
+      <button class="tab-btn" data-tab="rec">REC</button>
       <span class="ph-r" id="lastActChip">STOP</span>
     </div>
     <div class="panel-body">
@@ -2465,6 +2822,58 @@ svg.schem{width:100%;height:100%;display:block}
 
         <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
       </div><!-- /tab-arm -->
+
+      <div class="tab-content" id="tab-rec" style="display:none">
+      <div class="deck-status">
+        <div class="stat-card" id="cardRecMode">
+          <div class="stat-label">REC_STATE</div>
+          <div class="stat-val" id="recPanelState" style="font-size:13px">IDLE</div>
+        </div>
+        <div class="stat-card" id="cardRecCnt">
+          <div class="stat-label">EVENTS · DUR</div>
+          <div class="stat-val" id="recPanelMeta" style="font-size:13px">0 · 0.0s</div>
+        </div>
+      </div>
+
+      <div class="rec-progress-row" id="recProgRow" style="display:none">
+        <div class="rec-progress-track"><div class="rec-progress-fill" id="recProgFill"></div></div>
+        <div class="rec-progress-meta" id="recProgMeta">— / —</div>
+      </div>
+      <div class="rec-current" id="recCurrent" style="display:none">▶ <span id="recCurrentText">—</span></div>
+
+      <div>
+        <div class="sec-label">RECORD · MEMORY · MAX 10MIN</div>
+        <div class="btn-row btn-2" style="margin-top:6px">
+          <button class="btn" id="btnRecToggle">● REC</button>
+          <button class="btn compact" id="btnRecClear" disabled>CLEAR</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">PLAYBACK</div>
+        <div class="btn-row btn-3" style="margin-top:6px">
+          <button class="btn" id="btnRecPlayFwd" disabled>▶ PLAY</button>
+          <button class="btn" id="btnRecPlayRev" disabled>◀ REVERSE</button>
+          <button class="btn compact" id="btnRecStopPlay" disabled>■ STOP</button>
+        </div>
+        <div class="slider-row" style="margin-top:8px">
+          <span class="slider-label">SPD</span>
+          <input type="range" id="recSpeed" min="0.25" max="4" step="0.25" value="1">
+          <span class="slider-val" id="recSpeedVal">1.00×</span>
+        </div>
+        <label class="cal-toggle">
+          <input type="checkbox" id="recCalibrate">
+          <span>CALIBRATE · ULTRA Δ VISUALIZATION</span>
+        </label>
+      </div>
+
+      <div id="recCalDiff" class="rec-cal-diff" style="display:none">
+        <div class="sec-label">ULTRA · REC vs LIVE (mm)</div>
+        <div class="rec-cal-row"><span>S1·F</span><span id="recCalRec1">—</span><span id="recCalLive1">—</span><span id="recCalDiff1">—</span></div>
+        <div class="rec-cal-row"><span>S2·L</span><span id="recCalRec2">—</span><span id="recCalLive2">—</span><span id="recCalDiff2">—</span></div>
+        <div class="rec-cal-row"><span>S3·R</span><span id="recCalRec3">—</span><span id="recCalLive3">—</span><span id="recCalDiff3">—</span></div>
+      </div>
+      </div><!-- /tab-rec -->
     </div>
   </section>
 
@@ -2578,6 +2987,7 @@ svg.schem{width:100%;height:100%;display:block}
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
       else if (m.type === 'map'){ applyMap(m.data); }
+      else if (m.type === 'rec'){ applyRec(m.data); }
       else if (m.type === 'volume'){
         const v = m.data || {};
         if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
@@ -2753,9 +3163,10 @@ svg.schem{width:100%;height:100%;display:block}
     if (!holdRenewers[action]) return;
     clearInterval(holdRenewers[action]);
     delete holdRenewers[action];
+    // 单键释放:剩余 hold action 仍由后端 round-robin 继续
+    wsSend({type:'hold', state:'up', action});
     if (Object.keys(holdRenewers).length === 0){
-      // 双通道 stop:WS 抖动时 HTTP 路径有时更快;两条都到 release 也只发一次 car.stop()
-      wsSend({type:'hold', state:'up'});
+      // 全松开时兜底:HTTP stop 防 WS 抖动
       try{ navigator.sendBeacon('/api/cmd/stop'); }catch(e){}
     }
   }
@@ -3101,6 +3512,29 @@ svg.schem{width:100%;height:100%;display:block}
       hits.innerHTML = parts.join('');
     }
 
+    // Recording trail overlay:回放时叠灰虚线(原录)+ 亮琥珀(回放实际)
+    const recTrail = document.getElementById('recordedTrail');
+    const repTrail = document.getElementById('replayTrail');
+    if (recTrail && repTrail){
+      if (recState.playing && recState.playback){
+        const drawPolyline = (pts, el) => {
+          let s = '';
+          pts.forEach(p => {
+            if (p && p.x != null){
+              const [sx, sy] = worldToSvg(p.x, p.y, pose);
+              s += `${sx.toFixed(1)},${sy.toFixed(1)} `;
+            }
+          });
+          el.setAttribute('points', s);
+        };
+        drawPolyline(recState.playback.trail_recorded || [], recTrail);
+        drawPolyline(recState.playback.trail_replay || [], repTrail);
+      } else {
+        recTrail.setAttribute('points', '');
+        repTrail.setAttribute('points', '');
+      }
+    }
+
     // Origin marker(起点 0,0)— 在视野内才显示
     const origin = document.getElementById('originMarker');
     if (origin){
@@ -3193,6 +3627,119 @@ svg.schem{width:100%;height:100%;display:block}
     }
     if (t) t.setAttribute('fill', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
   }
+
+  // ============ Recording ============
+  let recState = {recording:false, playing:false, event_count:0, duration_s:0, elapsed_s:0, playback:null};
+  function applyRec(d){
+    recState = d || recState;
+    const btnRec = $('#btnRecToggle');
+    const btnClear = $('#btnRecClear');
+    const btnPlay = $('#btnRecPlayFwd');
+    const btnRev = $('#btnRecPlayRev');
+    const btnStop = $('#btnRecStopPlay');
+    const stEl = $('#recPanelState');
+    const metaEl = $('#recPanelMeta');
+    const progRow = $('#recProgRow');
+    const progFill = $('#recProgFill');
+    const progMeta = $('#recProgMeta');
+    const curEl = $('#recCurrent');
+    const curTxt = $('#recCurrentText');
+    const calBox = $('#recCalDiff');
+
+    // 状态文字 + REC 按钮形态
+    if (d.recording){
+      stEl.textContent = `RECORDING · ${d.elapsed_s.toFixed(1)}s`;
+      stEl.style.color = '#ff3a2e';
+      btnRec.textContent = '■ STOP REC';
+      btnRec.classList.add('recording');
+    } else if (d.playing){
+      const pb = d.playback || {};
+      const dirTxt = pb.direction === 'reverse' ? '◀ REV' : '▶ FWD';
+      stEl.textContent = `PLAYBACK · ${dirTxt} ${pb.speed?.toFixed(2)}×`;
+      stEl.style.color = '#5af0ff';
+      btnRec.textContent = '● REC';
+      btnRec.classList.remove('recording');
+    } else {
+      stEl.textContent = d.event_count > 0 ? 'READY · IDLE' : 'IDLE';
+      stEl.style.color = '';
+      btnRec.textContent = '● REC';
+      btnRec.classList.remove('recording');
+    }
+    metaEl.textContent = `${d.event_count} · ${d.duration_s.toFixed(1)}s`;
+
+    // 按钮 disabled 状态
+    const idle = !d.recording && !d.playing;
+    const hasRec = d.event_count > 0;
+    btnRec.disabled = d.playing;
+    btnClear.disabled = !idle || !hasRec;
+    btnPlay.disabled = !idle || !hasRec;
+    btnRev.disabled = !idle || !hasRec;
+    btnStop.disabled = !d.playing;
+
+    // 回放进度条 + 当前指令
+    if (d.playing && d.playback){
+      const pb = d.playback;
+      const pct = pb.duration > 0 ? Math.min(100, 100 * pb.elapsed / pb.duration) : 0;
+      progRow.style.display = '';
+      progFill.style.width = pct.toFixed(1) + '%';
+      progMeta.textContent = `${pb.elapsed.toFixed(1)}/${pb.duration.toFixed(1)}s · ${pb.idx}/${pb.total}`;
+      if (pb.current){
+        curEl.style.display = '';
+        const kind = pb.current.kind || '';
+        const act = pb.current.action || '';
+        curTxt.textContent = `${kind.toUpperCase()} · ${act.toUpperCase()}`;
+      } else {
+        curEl.style.display = 'none';
+      }
+      // 校准对比
+      if (pb.calibrate && pb.ultra_recorded && pb.ultra_live){
+        calBox.style.display = '';
+        [1,2,3].forEach(id => {
+          const r = pb.ultra_recorded[id];
+          const l = pb.ultra_live[id];
+          const diff = (pb.ultra_diff_mm || {})[id];
+          $(`#recCalRec${id}`).textContent = r != null ? r : '—';
+          $(`#recCalLive${id}`).textContent = l != null ? l : '—';
+          const dEl = $(`#recCalDiff${id}`);
+          if (diff != null){
+            dEl.textContent = (diff >= 0 ? '+' : '') + diff;
+            dEl.style.color = Math.abs(diff) > 150 ? '#ff3a2e' : (Math.abs(diff) > 50 ? '#ffb000' : '#7fff5a');
+          } else { dEl.textContent = '—'; dEl.style.color = ''; }
+        });
+      } else {
+        calBox.style.display = 'none';
+      }
+    } else {
+      progRow.style.display = 'none';
+      curEl.style.display = 'none';
+      calBox.style.display = 'none';
+    }
+  }
+
+  // Rec button handlers
+  $('#btnRecToggle').addEventListener('click', async () => {
+    try {
+      if (recState.recording){ await fetch('/api/rec/stop', {method:'POST'}); }
+      else { await fetch('/api/rec/start', {method:'POST'}); }
+    } catch(e){}
+  });
+  $('#btnRecClear').addEventListener('click', async () => {
+    try { await fetch('/api/rec/clear', {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecPlayFwd').addEventListener('click', async () => {
+    const sp = $('#recSpeed').value; const cal = $('#recCalibrate').checked ? 1 : 0;
+    try { await fetch(`/api/rec/play?direction=forward&speed=${sp}&calibrate=${cal}`, {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecPlayRev').addEventListener('click', async () => {
+    const sp = $('#recSpeed').value; const cal = $('#recCalibrate').checked ? 1 : 0;
+    try { await fetch(`/api/rec/play?direction=reverse&speed=${sp}&calibrate=${cal}`, {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecStopPlay').addEventListener('click', async () => {
+    try { await fetch('/api/rec/stop_playback', {method:'POST'}); } catch(e){}
+  });
+  $('#recSpeed').addEventListener('input', ev => {
+    $('#recSpeedVal').textContent = parseFloat(ev.target.value).toFixed(2) + '×';
+  });
 
   function applyUltra(u){
     const MAX = 4000;
