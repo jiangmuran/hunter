@@ -90,7 +90,10 @@ state: dict = {
     "last_action": "STOP",
     "recording": False,
     "rec_path": None,
+    "rec_start_t": None,
 }
+
+MAX_RECORDING_DURATION_S = 5 * 60  # 5 分钟自动 stop,防止前端断开导致孤儿录音
 
 t_boot = time.time()
 t_last_esp32 = 0.0  # last time any ESP32 line was received
@@ -145,18 +148,27 @@ class CameraStreamer:
 
     def _loop(self):
         delay = 1.0 / max(1.0, self.target_fps)
+        fail_streak = 0
+        FAIL_THRESHOLD = 15      # 连续这么多帧失败就触发重连
+        RECONNECT_BACKOFF = 2.0   # 重连失败后等多久再试
         while self.running:
             t0 = time.time()
             try:
-                ok, frame = self.cap.read()
+                ok, frame = (self.cap.read() if self.cap is not None else (False, None))
             except Exception as e:
                 self.error = f"read: {e}"
-                time.sleep(0.3)
-                continue
+                ok, frame = False, None
             if not ok or frame is None:
-                self.error = "read returned None"
-                time.sleep(0.2)
+                fail_streak += 1
+                self.error = f"read failed (streak {fail_streak})"
+                if fail_streak >= FAIL_THRESHOLD:
+                    self._reopen()
+                    fail_streak = 0
+                    time.sleep(RECONNECT_BACKOFF)
+                else:
+                    time.sleep(0.2)
                 continue
+            fail_streak = 0
             self.error = None
             try:
                 ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
@@ -173,6 +185,33 @@ class CameraStreamer:
             dt = time.time() - t0
             if dt < delay:
                 time.sleep(delay - dt)
+
+    def _reopen(self):
+        """Release current handle and try to re-open the V4L2 device (e.g. after USB hot-unplug)."""
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+        try:
+            cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(self.device)
+            if not cap.isOpened():
+                self.error = "reopen: VideoCapture still closed"
+                return False
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap = cap
+            self.error = None
+            return True
+        except Exception as e:
+            self.error = f"reopen: {e}"
+            return False
 
     def stop(self):
         self.running = False
@@ -644,6 +683,16 @@ def install_event_hooks():
                 if minimap is not None:
                     minimap.set_button_speed(bs)
             except Exception: pass
+        elif line == "3WD-ROBOT-START":
+            # ESP32 刚刚启动(物理复位或 USB 重插)→ 1 秒后自动重新启用 ULTRA_REPORT
+            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 1s", "sys")
+            def _reapply():
+                try:
+                    if car is not None:
+                        car.ultrasonic_report_on()
+                except Exception as e:
+                    push_log(f"auto re-enable ultra_report failed: {e}", "sys")
+            threading.Timer(1.0, _reapply).start()
 
         if not line.startswith("ULTRA,"):
             push_log(line, "esp32")
@@ -679,7 +728,18 @@ def install_event_hooks():
                 minimap.set_action(action)
             elif action in ("STOP", "EMERGENCY_STOP"):
                 minimap.set_action(None)
-        orig_send(c)
+        # 串口写带 1 次 retry(短瞬故障常见,长故障靠 serial watchdog)
+        last_err = None
+        for attempt in range(2):
+            try:
+                orig_send(c)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.05)
+        if last_err is not None:
+            push_log(f"send fail (2 attempts) {action}: {last_err}", "sys")
 
     car.send = wrapped_send
 
@@ -700,6 +760,14 @@ async def lifespan(app: FastAPI):
         )
         install_event_hooks()
         push_log("boot: car ready", "sys")
+        # 默认启用 ULTRA_REPORT,让超声波数据开箱即用。
+        # 用户切到 OBSTACLE 模式时 setObs(true) 会先 ultra_off 再 obstacle_on(互斥已处理)。
+        try:
+            await asyncio.sleep(0.3)
+            car.ultrasonic_report_on()
+            push_log("boot: enabled ULTRA_REPORT by default", "sys")
+        except Exception as e:
+            push_log(f"boot: ultra_report auto-enable failed: {e}", "sys")
     except Exception as e:
         push_log(f"boot: car FAILED: {e}", "sys")
         car = None
@@ -746,6 +814,90 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
+    # ---- ESP32 串口故障检测 + 自动重连(覆盖三种场景)----
+    # 1) 开机时 car init 就失败 (USB 没插好 / ESP32 没上电) → 重试 init
+    # 2) 运行中 USB 拔了 / 串口失效 → reopen
+    # 3) ESP32 firmware 复位但 host serial 还有效 → 不动 (reader 会自己收数据)
+    async def _serial_watchdog():
+        nonlocal_dummy = None  # placeholder
+        global car
+        consec_fail = 0
+        while True:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            # 场景 1: car 整个没初始化成功 → 重试 CarController()
+            if car is None:
+                try:
+                    push_log("serial watchdog: trying CarController init...", "sys")
+                    new_car = CarController(
+                        ultrasonic_callback=on_ultra,
+                        ps3_l1_callback=on_ps3_l1,
+                        ps3_l2_callback=on_ps3_l2,
+                    )
+                    car = new_car
+                    install_event_hooks()
+                    push_log("serial watchdog: car initialized after retry", "sys")
+                    consec_fail = 0
+                    try:
+                        await asyncio.sleep(0.3)
+                        car.ultrasonic_report_on()
+                        push_log("serial watchdog: re-enabled ULTRA_REPORT", "sys")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    consec_fail += 1
+                    push_log(f"serial watchdog: car init failed #{consec_fail}: {e}", "sys")
+                continue
+            # 场景 2: car 存在但串口探测异常 → close + reopen
+            try:
+                if car.ser is None or not car.ser.is_open:
+                    raise IOError("ser not open")
+                _ = car.ser.in_waiting
+                _ = car.ser.port
+                consec_fail = 0
+                continue
+            except Exception as e:
+                consec_fail += 1
+                push_log(f"serial watchdog: fault #{consec_fail}: {e}", "sys")
+            try: car.ser.close()
+            except Exception: pass
+            await asyncio.sleep(min(2 + consec_fail, 10))
+            try:
+                new_ser = _pyserial.Serial(
+                    port=car.port, baudrate=car.baudrate, timeout=0.1,
+                )
+                car.ser = new_ser
+                push_log(f"serial watchdog: reconnected ({car.port})", "sys")
+                consec_fail = 0
+            except Exception as e2:
+                push_log(f"serial watchdog: reconnect failed: {e2}", "sys")
+    _sw_task = asyncio.create_task(_serial_watchdog())
+
+    # ---- 录音超时:5 分钟自动 stop,防止前端断开/标签关闭导致 arecord 孤儿 ----
+    async def _rec_timeout_watcher():
+        while True:
+            try:
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                return
+            if not state.get("recording"): continue
+            start = state.get("rec_start_t")
+            if start is None: continue
+            elapsed = time.time() - start
+            if elapsed > MAX_RECORDING_DURATION_S and audio is not None:
+                push_log(f"audio: auto-stop after {int(elapsed)}s (max {MAX_RECORDING_DURATION_S}s)", "audio")
+                try:
+                    p = audio.stop_recording()
+                    state["recording"] = False
+                    state["rec_path"] = None
+                    state["rec_start_t"] = None
+                    bcast({"type": "state", "data": state})
+                except Exception as e:
+                    push_log(f"audio auto-stop err: {e}", "sys")
+    _rt_task = asyncio.create_task(_rec_timeout_watcher())
+
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
     minimap.start()
@@ -765,6 +917,8 @@ async def lifespan(app: FastAPI):
     yield
     push_log("system shutdown", "sys")
     _mm_task.cancel()
+    _sw_task.cancel()
+    _rt_task.cancel()
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         try: obj.close() if hasattr(obj, "close") else obj.stop()
@@ -809,6 +963,22 @@ app = FastAPI(
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     return HTMLResponse(INDEX_HTML)
+
+
+@app.post("/api/system/restart", tags=["state"], summary="重启 robot-console.service",
+          description="模块炸掉时一键重启服务(systemctl restart)。Popen 触发后 systemctl 通过 dbus 让 systemd kill+restart 本进程,客户端 WS 会断开然后自动重连。")
+async def system_restart():
+    import subprocess as _sp
+    push_log("system: restart requested via API", "sys")
+    try:
+        _sp.Popen(
+            ["sudo", "systemctl", "restart", "robot-console"],
+            stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"restart failed: {e}")
+    return {"ok": True, "msg": "systemctl restart issued; service will restart in ~3s"}
 
 
 @app.get("/api/state", tags=["state"], summary="拉取当前完整状态 + 最近 80 条日志",
@@ -1072,6 +1242,7 @@ async def audio_rec_start():
         raise HTTPException(500, str(e))
     state["recording"] = True
     state["rec_path"] = path
+    state["rec_start_t"] = time.time()
     push_log(f"rec start: {fn}", "audio")
     bcast({"type": "state", "data": state})
     return {"ok": True, "path": path}
@@ -1089,6 +1260,7 @@ async def audio_rec_stop():
         raise HTTPException(500, str(e))
     state["recording"] = False
     state["rec_path"] = None
+    state["rec_start_t"] = None
     push_log(f"rec save: {os.path.basename(path) if path else '?'}", "audio")
     bcast({"type": "state", "data": state})
     return {"ok": True, "path": path}
@@ -1131,13 +1303,87 @@ async def audio_play(req: Request):
     return {"ok": True}
 
 
-@app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放")
+def _amixer_get(control: str, card: str = "Device") -> int | None:
+    """Return mixer control as percent 0-100, or None if not found."""
+    try:
+        import subprocess, re
+        r = subprocess.run(
+            ["amixer", "-c", card, "sget", control],
+            capture_output=True, text=True, timeout=2,
+        )
+        m = re.search(r"\[(\d+)%\]", r.stdout)
+        if m: return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _amixer_set(control: str, percent: int, card: str = "Device") -> bool:
+    percent = max(0, min(100, int(percent)))
+    try:
+        import subprocess
+        subprocess.run(
+            ["amixer", "-c", card, "sset", control, f"{percent}%"],
+            capture_output=True, timeout=2, check=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/audio/volume", tags=["audio"], summary="读 ALSA mixer 音量 (USB Audio Device)",
+         description="返回 speaker / mic 当前百分比。amixer 控制项:Speaker, Mic, Auto Gain Control")
+async def get_volume():
+    return {
+        "speaker": _amixer_get("Speaker"),
+        "mic": _amixer_get("Mic"),
+        "agc": _amixer_get("Auto Gain Control"),
+    }
+
+
+@app.post("/api/audio/volume", tags=["audio"], summary="设 ALSA mixer 音量",
+          description="body 任选字段:`{speaker: 0-100, mic: 0-100, agc: 0|1}`。会通过 WS 广播,多客户端同步。")
+async def set_volume(req: Request):
+    body = await req.json()
+    out = {}
+    for k_in, ctrl in (("speaker", "Speaker"), ("mic", "Mic"), ("agc", "Auto Gain Control")):
+        if k_in in body:
+            ok = _amixer_set(ctrl, body[k_in])
+            out[k_in] = _amixer_get(ctrl) if ok else None
+            push_log(f"vol {k_in} → {out[k_in]}%", "audio")
+    # 广播给所有客户端同步 slider 位置
+    bcast({"type": "volume", "data": {
+        "speaker": _amixer_get("Speaker"),
+        "mic": _amixer_get("Mic"),
+    }})
+    return out
+
+
+@app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放 (audio_driver 和 car_driver 两路 aplay 都 kill)")
 async def audio_stop():
-    if audio is None:
-        raise HTTPException(503, "audio not ready")
-    audio.stop_playback()
-    push_log("audio playback stopped", "audio")
-    return {"ok": True}
+    import subprocess as _sp
+    sources = []
+    # 1) AudioController 的播放
+    if audio is not None:
+        try:
+            audio.stop_playback()
+            sources.append("audio")
+        except Exception as e:
+            push_log(f"audio_driver stop err: {e}", "sys")
+    # 2) CarController 的猫叫播放(cat1-4 走的是 car_driver.play_wav,跟 audio_driver 是不同 subprocess)
+    if car is not None:
+        try:
+            with car.audio_lock:
+                if car.audio_process is not None and car.audio_process.poll() is None:
+                    car.audio_process.terminate()
+                    try: car.audio_process.wait(timeout=0.3)
+                    except _sp.TimeoutExpired: car.audio_process.kill()
+                    car.audio_process = None
+                    sources.append("car")
+        except Exception as e:
+            push_log(f"car audio stop err: {e}", "sys")
+    push_log(f"audio stopped ({', '.join(sources) or 'nothing playing'})", "audio")
+    return {"ok": True, "stopped_sources": sources}
 
 
 # ====================== Camera stream ======================
@@ -1300,7 +1546,9 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 .pane-cam{grid-area:cam}
 .pane-cam .panel-body{gap:10px;padding:10px}
 
-.cam-frame{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line2);overflow:hidden;flex:0 0 auto}
+.cam-frame{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line2);overflow:hidden;flex:0 0 auto;
+  max-height:55vh}
+.pane-cam .panel-body{overflow-y:auto}
 .cam-frame::before{content:"";position:absolute;inset:0;
   background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,rgba(255,176,0,.04) 2px,rgba(255,176,0,.04) 3px);
   pointer-events:none;z-index:2;
@@ -1310,6 +1558,8 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 }
 .cam-hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
 .cam-hud rect.hud-bar.hot{animation:flicker .35s infinite}
+/* REAR CAM 镜像:cam-img 水平翻转;bbox 由 JS 反转 x 坐标(保留文字方向);HUD/corner 不动 */
+.cam-frame.mirror .cam-img{transform:scaleX(-1)}
 .cam-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;display:block;z-index:1}
 .cam-corner{position:absolute;width:14px;height:14px;border:1.5px solid var(--amber);z-index:4;opacity:.85}
 .cam-corner.tl{top:4px;left:4px;border-right:none;border-bottom:none}
@@ -1481,6 +1731,8 @@ svg.schem{width:100%;height:100%;display:block}
       <div class="h-stat" title="USB 摄像头"><div class="dot" id="dotCam"></div><span>CAM</span></div>
       <div class="h-stat" title="树莓派 CPU 温度"><span style="color:var(--text-mute)">T°</span><span id="cpuTemp">--</span></div>
       <div class="h-stat" title="启动时长"><span style="color:var(--text-mute)">T+</span><span id="uptime">00:00:00</span></div>
+      <button class="map-reset-btn" id="btnRestart" title="restart robot-console.service (sudo systemctl restart)"
+              style="border-color:var(--red-d);color:var(--red)">⟳ RESTART</button>
     </div>
   </header>
 
@@ -1505,6 +1757,14 @@ svg.schem{width:100%;height:100%;display:block}
         <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
         <div class="cam-rec"><div class="recdot"></div>LIVE</div>
         <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
+      </div>
+
+      <div class="btn-row btn-2">
+        <button class="btn" id="btnMirror"><span>⟷ REAR CAM</span><span class="badge" id="mirrorBadge">OFF</span></button>
+        <div class="stat-card" style="text-align:left">
+          <div class="stat-label">VIEW</div>
+          <div class="stat-val" style="font-size:13px" id="viewLabel">VEHICLE</div>
+        </div>
       </div>
 
       <div>
@@ -1705,6 +1965,12 @@ svg.schem{width:100%;height:100%;display:block}
       </div>
 
       <div>
+        <div class="sec-label">VOLUME · ALSA MIXER</div>
+        <div class="slider-row"><span class="slider-label">SPK</span><input type="range" id="volSpk" min="0" max="100" step="2" value="50"><span class="slider-val" id="volSpkVal">--%</span></div>
+        <div class="slider-row"><span class="slider-label">MIC</span><input type="range" id="volMic" min="0" max="100" step="2" value="50"><span class="slider-val" id="volMicVal">--%</span></div>
+      </div>
+
+      <div>
         <div class="sec-label">CAT_VOICE · [ 1 / 2 / 3 / 4 ]</div>
         <div class="btn-row btn-4">
           <button class="btn compact" data-action="cat1">CAT_1</button>
@@ -1768,6 +2034,11 @@ svg.schem{width:100%;height:100%;display:block}
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
       else if (m.type === 'map'){ applyMap(m.data); }
+      else if (m.type === 'volume'){
+        const v = m.data || {};
+        if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
+        if (v.mic != null){ volMic.value = v.mic; volMicVal.textContent = v.mic + '%'; }
+      }
     };
   }
   connect();
@@ -1871,14 +2142,48 @@ svg.schem{width:100%;height:100%;display:block}
     $('#uptime').textContent = `${hh}:${mm}:${ss}`;
   }, 500);
 
+  // ============ REAR CAM mode (摄像头朝车后方装的视角校正) ============
+  // 开启时:视频水平镜像;WASD W↔S 反转、QE 反转、AD 保持;YOLO bbox 也镜像 x
+  // 让用户的 FPS 直觉(按 W 画面里东西靠近)跟实际车控制对应起来
+  let rearMode = localStorage.getItem('rearMode') === 'true';
+  function applyRearMode(){
+    const frame = document.querySelector('.cam-frame');
+    if (frame) frame.classList.toggle('mirror', rearMode);
+    const btn = $('#btnMirror');
+    if (btn) btn.classList.toggle('on', rearMode);
+    const badge = $('#mirrorBadge');
+    if (badge) badge.textContent = rearMode ? 'ON' : 'OFF';
+    const lbl = $('#viewLabel');
+    if (lbl) lbl.textContent = rearMode ? 'CAMERA' : 'VEHICLE';
+  }
+  function toggleRearMode(){
+    // 切换前先停止所有 hold,避免 stopHold(反转后) 找不到 timer 残留
+    pressed.forEach((action, k) => { stopHold(action); highlightKey(k, false); });
+    pressed.clear();
+    rearMode = !rearMode;
+    localStorage.setItem('rearMode', String(rearMode));
+    applyRearMode();
+  }
+
   // ============ Hold-to-move ============
-  const moveMap = {
+  const moveMapNormal = {
     'w':'forward','arrowup':'forward',
     's':'backward','arrowdown':'backward',
     'a':'left','arrowleft':'left',
     'd':'right','arrowright':'right',
     'q':'rotate_ccw','e':'rotate_cw',
   };
+  const moveMapRear = {
+    // 反转 W↔S 让"按 W 画面里东西靠近"
+    'w':'backward','arrowup':'backward',
+    's':'forward','arrowdown':'forward',
+    // A/D 配合水平镜像后已经对了
+    'a':'left','arrowleft':'left',
+    'd':'right','arrowright':'right',
+    // 反转 Q↔E 让旋转方向跟画面世界滚动方向一致
+    'q':'rotate_cw','e':'rotate_ccw',
+  };
+  function moveMap(){ return rearMode ? moveMapRear : moveMapNormal; }
   const HOLD_MS = 100;
   const holdTimers = {};
   function startHold(action){
@@ -1893,21 +2198,29 @@ svg.schem{width:100%;height:100%;display:block}
   }
 
   // ============ Keyboard ============
-  const pressed = new Set();
+  const pressed = new Map();  // key -> action(根据 rearMode 决定的实际 cmd)
   let recording = false;
   document.addEventListener('keydown', ev => {
     if (ev.repeat) return;
-    if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
     const k = ev.key.toLowerCase();
-    if (moveMap[k]){
+    // ESC 是全局停止键,永远生效(即使焦点在 YOLO filter input 框)
+    if (k === 'escape'){
+      cmd('stop');
+      audioApi('/api/audio/stop');
+      if (ev.target && ev.target.blur) ev.target.blur();
+      ev.preventDefault();
+      return;
+    }
+    if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
+    const action = moveMap()[k];
+    if (action){
       if (pressed.has(k)) return;
-      pressed.add(k);
-      startHold(moveMap[k]); highlightKey(k, true);
+      pressed.set(k, action);
+      startHold(action); highlightKey(k, true);
       ev.preventDefault(); return;
     }
     switch(k){
       case ' ': doEmergency(); ev.preventDefault(); break;
-      case 'escape': cmd('stop'); audioApi('/api/audio/stop'); break;
       case 'o': setObs(true); break;
       case 'p': setObs(false); break;
       case 'u': setUltra(true); break;
@@ -1924,24 +2237,54 @@ svg.schem{width:100%;height:100%;display:block}
   });
   document.addEventListener('keyup', ev => {
     const k = ev.key.toLowerCase();
-    if (moveMap[k] && pressed.has(k)){ pressed.delete(k); stopHold(moveMap[k]); highlightKey(k, false); }
+    if (pressed.has(k)){
+      const action = pressed.get(k);
+      pressed.delete(k);
+      stopHold(action);
+      highlightKey(k, false);
+    }
     if (k === 'r') stopRec();
   });
   window.addEventListener('blur', () => {
-    pressed.forEach(k => { stopHold(moveMap[k]); highlightKey(k, false); });
+    pressed.forEach((action, k) => { stopHold(action); highlightKey(k, false); });
     pressed.clear();
     stopRec();
+  });
+
+  // 关 tab / 刷新 / 关浏览器时,保证 stop recording 一定发出 (sendBeacon 比 fetch 可靠)
+  window.addEventListener('beforeunload', () => {
+    if (recording){
+      try{ navigator.sendBeacon('/api/audio/rec/stop'); }catch(e){}
+    }
+    // 同时停止任何 hold 中的方向 cmd
+    if (Object.keys(holdTimers).length > 0){
+      try{ navigator.sendBeacon('/api/cmd/stop'); }catch(e){}
+    }
   });
   function highlightKey(k, on){
     const el = document.querySelector(`.key[data-key="${k}"]`);
     if (el) el.classList.toggle('active', on);
   }
 
-  // ============ Mouse/touch keys ============
+  // ============ Mouse/touch keys (rearMode 时反转 W/S 和 Q/E) ============
+  const rearActionMap = {
+    forward: 'backward', backward: 'forward',
+    rotate_ccw: 'rotate_cw', rotate_cw: 'rotate_ccw',
+    left: 'left', right: 'right',
+  };
   $$('.key[data-press]').forEach(el => {
-    const action = el.dataset.press;
-    const down = ev => { ev.preventDefault(); startHold(action); el.classList.add('active'); };
-    const up   = ev => { stopHold(action); el.classList.remove('active'); };
+    let currentHoldAction = null;
+    const resolve = () => rearMode ? (rearActionMap[el.dataset.press] || el.dataset.press) : el.dataset.press;
+    const down = ev => {
+      ev.preventDefault();
+      currentHoldAction = resolve();
+      startHold(currentHoldAction);
+      el.classList.add('active');
+    };
+    const up = () => {
+      if (currentHoldAction){ stopHold(currentHoldAction); currentHoldAction = null; }
+      el.classList.remove('active');
+    };
     el.addEventListener('mousedown', down);
     el.addEventListener('mouseup', up);
     el.addEventListener('mouseleave', up);
@@ -1949,6 +2292,10 @@ svg.schem{width:100%;height:100%;display:block}
     el.addEventListener('touchend', up);
     el.addEventListener('touchcancel', up);
   });
+
+  // REAR CAM toggle 按钮(无键盘快捷键,避免跟 m=speed_reset / 字母键冲突)
+  $('#btnMirror').addEventListener('click', () => toggleRearMode());
+  applyRearMode();  // 初始化 UI 反映 localStorage 状态
 
   // ============ Action buttons ============
   $$('button.btn[data-action]').forEach(el => {
@@ -1991,6 +2338,30 @@ svg.schem{width:100%;height:100%;display:block}
   btnRec.addEventListener('touchend', recUp);
   btnRec.addEventListener('touchcancel', recUp);
   $('#btnStopAudio').addEventListener('click', () => audioApi('/api/audio/stop'));
+
+  // ============ Volume sliders ============
+  const volSpk = $('#volSpk'), volSpkVal = $('#volSpkVal');
+  const volMic = $('#volMic'), volMicVal = $('#volMicVal');
+  let volDebounce = null;
+  function volPost(body){
+    clearTimeout(volDebounce);
+    volDebounce = setTimeout(() => {
+      fetch('/api/audio/volume', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }, 150);
+  }
+  volSpk.addEventListener('input', e => volSpkVal.textContent = e.target.value + '%');
+  volSpk.addEventListener('change', e => volPost({speaker: parseInt(e.target.value)}));
+  volMic.addEventListener('input', e => volMicVal.textContent = e.target.value + '%');
+  volMic.addEventListener('change', e => volPost({mic: parseInt(e.target.value)}));
+  // 初始拉
+  fetch('/api/audio/volume').then(r => r.ok ? r.json() : null).then(v => {
+    if (!v) return;
+    if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
+    if (v.mic != null){ volMic.value = v.mic; volMicVal.textContent = v.mic + '%'; }
+  }).catch(() => {});
 
   // ============ Recordings list ============
   async function loadRecs(){
@@ -2142,6 +2513,26 @@ svg.schem{width:100%;height:100%;display:block}
     } catch(e){}
   });
 
+  // RESTART 服务按钮
+  $('#btnRestart').addEventListener('click', async () => {
+    if (!confirm('Restart robot-console service?\nWebSocket 会短暂断开,几秒后自动重连。')) return;
+    try {
+      await fetch('/api/system/restart', {method: 'POST'});
+    } catch(e){}
+    // 显示重启中提示
+    let banner = document.getElementById('restartBanner');
+    if (!banner){
+      banner = document.createElement('div');
+      banner.id = 'restartBanner';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:14px;background:rgba(255,58,46,.9);color:#0b0907;'
+        + 'text-align:center;font-family:var(--font-mono);font-weight:700;letter-spacing:.2em;z-index:9999;font-size:12px;';
+      banner.textContent = '⟳ RESTARTING ROBOT-CONSOLE … RECONNECTING IN ~5s';
+      document.body.appendChild(banner);
+    }
+    // 5 秒后自动隐藏(WS 会自己重连刷新状态)
+    setTimeout(() => { try{ banner.remove(); }catch(e){} }, 8000);
+  });
+
   // 页面初次加载就拉一次地图状态(不必等下次 200ms WS push)
   fetch('/api/map/state').then(r => r.ok ? r.json() : null).then(d => { if (d) applyMap(d); }).catch(() => {});
 
@@ -2216,7 +2607,12 @@ svg.schem{width:100%;height:100%;display:block}
     const VW = 400, VH = 300;
     let html = '';
     dets.forEach(d => {
-      const x = d.x * VW, y = d.y * VH, w = d.w * VW, h = d.h * VH;
+      let x = d.x * VW;
+      const y = d.y * VH;
+      const w = d.w * VW;
+      const h = d.h * VH;
+      // REAR CAM 镜像模式:bbox 跟 cam-img 一起水平翻转(图像里物体位置变了)
+      if (rearMode) x = VW - x - w;
       const c = yoloColor(d.cls);
       const text = `${d.label} ${Math.round(d.conf * 100)}`;
       const tw = Math.min(VW - x, text.length * 6 + 8);
