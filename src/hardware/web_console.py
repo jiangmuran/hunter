@@ -259,6 +259,8 @@ class MiniMap:
     # 速度模型常数(初始猜测,可通过 /api/map/config 实时标定)
     K_LINEAR = 0.05    # mm/s per BUTTONSPEED. BS=2000 → 100mm/s
     K_ANGULAR = 0.0006 # rad/s per BUTTONSPEED. BS=2000 → 1.2 rad/s ≈ 69°/s
+    # 重心前置 → 后驱效率低于前驱,后退速度 / 前进速度 比率
+    BACKWARD_RATIO = 0.7
     # 传感器朝向(车体局部,弧度,基于 schematic S2 左前 / S1 前 / S3 右前)
     SENSOR_YAW = {1: 0.0, 2: _math.radians(50), 3: _math.radians(-50)}
     SENSOR_OFFSET_X_MM = 50
@@ -331,7 +333,7 @@ class MiniMap:
         w = self.K_ANGULAR * self.button_speed
         vx_local = vy_local = dw = 0.0
         if a == "FORWARD":    vx_local = v
-        elif a == "BACKWARD": vx_local = -v
+        elif a == "BACKWARD": vx_local = -v * self.BACKWARD_RATIO
         elif a == "LEFT":     vy_local = v
         elif a == "RIGHT":    vy_local = -v
         elif a == "ROT_CCW":  dw = w
@@ -383,15 +385,17 @@ class MiniMap:
                 "cell_count": len(self.grid),
                 "recent_hits": list(self.recent_hits),
                 "pose_history": list(self.pose_history),
-                "config": {"k_linear": self.K_LINEAR, "k_angular": self.K_ANGULAR},
+                "config": {"k_linear": self.K_LINEAR, "k_angular": self.K_ANGULAR, "backward_ratio": self.BACKWARD_RATIO},
             }
 
-    def configure(self, *, k_linear=None, k_angular=None):
+    def configure(self, *, k_linear=None, k_angular=None, backward_ratio=None):
         with self.lock:
             if k_linear is not None:
                 self.K_LINEAR = max(0.001, min(1.0, float(k_linear)))
             if k_angular is not None:
                 self.K_ANGULAR = max(0.00001, min(0.01, float(k_angular)))
+            if backward_ratio is not None:
+                self.BACKWARD_RATIO = max(0.1, min(1.5, float(backward_ratio)))
         return self.snapshot()
 
 
@@ -635,20 +639,40 @@ class RecordingController:
         if direction != "reverse":
             return cmd_only
         duration = events[-1][0] if events else 0
-        out = []
+        # 步骤 1:整体逆序 + cmd 反映射 + hold_down <-> hold_up 互换
+        flipped = []
         for t, k, p in reversed(cmd_only):
             t_r = duration - t
             action = p.get("action") if isinstance(p, dict) else None
             inv = self.INVERSE.get(action, action) if action else None
             new_p = {"action": inv} if action else (p or {})
-            # hold_down <-> hold_up 互换(因为反着走时间)
-            if k == "hold_down":
-                out.append((t_r, "hold_up", new_p))
-            elif k == "hold_up":
-                out.append((t_r, "hold_down", new_p))
-            else:
-                out.append((t_r, k, new_p))
-        return out
+            if k == "hold_down": flipped.append([t_r, "hold_up", new_p])
+            elif k == "hold_up": flipped.append([t_r, "hold_down", new_p])
+            else: flipped.append([t_r, k, new_p])
+        # 步骤 2:事件级 timing 补偿 — 反映射后 backward 段比原 forward 走得近(差 1/ratio),
+        # forward 段比原 backward 走得远(差 ratio)。逐 hold 段调时长,后续事件 shift。
+        ratio = (minimap.BACKWARD_RATIO if minimap is not None else 0.7)
+        ratio = max(0.05, ratio)
+        shift = 0.0
+        hold_starts = {}
+        for ev in flipped:
+            ev[0] = ev[0] + shift
+            t_adj, k, p = ev[0], ev[1], ev[2]
+            action = p.get("action") if isinstance(p, dict) else None
+            if k == "hold_down" and action:
+                hold_starts[action] = t_adj
+            elif k == "hold_up" and action and action in hold_starts:
+                t_down = hold_starts.pop(action)
+                orig = t_adj - t_down
+                if action == "backward":
+                    extra = orig * (1.0 / ratio - 1.0)
+                elif action == "forward":
+                    extra = orig * (ratio - 1.0)
+                else:
+                    extra = 0.0
+                shift += extra
+                ev[0] = t_adj + extra
+        return [tuple(e) for e in flipped]
 
     def _playback_loop(self, events_snap):
         with self.lock:
@@ -1755,9 +1779,10 @@ async def cmd(action: str, duration: float = 0, distance: float = 0, angle: floa
             raise HTTPException(400, f"distance only valid for forward/backward/left/right")
         bs = state.get("speed") or 2000
         k_l = (minimap.K_LINEAR if minimap else 0.05)
-        v_mm_s = max(1.0, k_l * bs)
+        ratio = (minimap.BACKWARD_RATIO if minimap else 0.7) if action == "backward" else 1.0
+        v_mm_s = max(1.0, k_l * bs * ratio)
         d_s = float(distance) / v_mm_s
-        mode_detail = f"distance={distance}mm (est {v_mm_s:.1f}mm/s)"
+        mode_detail = f"distance={distance}mm (est {v_mm_s:.1f}mm/s, ratio×{ratio})"
     elif duration > 0:
         if action not in HOLD_ACTIONS:
             raise HTTPException(400, f"duration only valid for hold-able actions: {sorted(HOLD_ACTIONS)}")
@@ -2865,6 +2890,11 @@ svg.schem{width:100%;height:100%;display:block}
           <input type="checkbox" id="recCalibrate">
           <span>CALIBRATE · ULTRA Δ VISUALIZATION</span>
         </label>
+        <div class="slider-row" style="margin-top:6px" title="重心前置 → 后驱效率较低。降低此值倒车段拉长、distance API 自动补偿、minimap dead-reckoning 也用它">
+          <span class="slider-label">BACK_R</span>
+          <input type="range" id="backRatio" min="0.3" max="1.2" step="0.05" value="0.7">
+          <span class="slider-val" id="backRatioVal">0.70</span>
+        </div>
       </div>
 
       <div id="recCalDiff" class="rec-cal-diff" style="display:none">
@@ -3740,6 +3770,27 @@ svg.schem{width:100%;height:100%;display:block}
   $('#recSpeed').addEventListener('input', ev => {
     $('#recSpeedVal').textContent = parseFloat(ev.target.value).toFixed(2) + '×';
   });
+  // BACKWARD_RATIO 校准
+  $('#backRatio').addEventListener('input', ev => {
+    $('#backRatioVal').textContent = parseFloat(ev.target.value).toFixed(2);
+  });
+  $('#backRatio').addEventListener('change', async ev => {
+    const v = parseFloat(ev.target.value);
+    try {
+      await fetch('/api/map/config', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({backward_ratio: v})});
+    } catch(e){}
+  });
+  // 启动时拉一次 map config 同步初值
+  (async () => {
+    try {
+      const r = await fetch('/api/map/state'); const d = await r.json();
+      if (d && d.config && d.config.backward_ratio != null){
+        $('#backRatio').value = d.config.backward_ratio;
+        $('#backRatioVal').textContent = parseFloat(d.config.backward_ratio).toFixed(2);
+      }
+    } catch(e){}
+  })();
 
   function applyUltra(u){
     const MAX = 4000;
