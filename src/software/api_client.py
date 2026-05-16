@@ -3,21 +3,24 @@
 上层模块只 import HunterAPI，不直接写 URL 或 requests。
 """
 
-import requests
-import numpy as np
-import cv2
-
 API_BASE = "http://192.168.0.170:8000"
 
 
 class HunterAPI:
-    def __init__(self, base_url: str = API_BASE):
+    def __init__(self, base_url: str = API_BASE, session=None):
         self.base = base_url.rstrip("/")
-        self.session = requests.Session()
+        if session is None:
+            import requests
+
+            session = requests.Session()
+        self.session = session
 
     # ── 摄像头 ────────────────────────────────────────────
-    def snapshot(self) -> np.ndarray:
+    def snapshot(self):
         """返回当前帧 BGR numpy 数组"""
+        import cv2
+        import numpy as np
+
         resp = self.session.get(f"{self.base}/api/camera/snapshot.jpg", timeout=5)
         resp.raise_for_status()
         arr = np.frombuffer(resp.content, np.uint8)

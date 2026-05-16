@@ -23,28 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.expanduser("~/Desktop"))
 
-# ====== Prevent ESP32 reset when opening serial (preserves BT remote pairing) ======
-# 默认 pyserial 打开串口会 assert DTR/RTS,在 ESP32+CH340 板上 = 触发 EN 复位
-# → 蓝牙手柄连接丢失。这里把 DTR/RTS 先置 False 再 open,ESP32 不重启。
+# 用 default pyserial behaviour (跟 main_test.py 一致)
 import serial as _pyserial
-_orig_serial_init = _pyserial.Serial.__init__
-def _patched_serial_init(self, *args, **kwargs):
-    port = kwargs.get("port", args[0] if args else None)
-    if port is None:
-        _orig_serial_init(self, *args, **kwargs)
-        return
-    kwargs2 = {**kwargs, "port": None}
-    if args and "port" not in kwargs:
-        args = args[1:]
-    _orig_serial_init(self, *args, **kwargs2)
-    self.port = port
-    try:
-        self.dtr = False
-        self.rts = False
-    except Exception:
-        pass
-    self.open()
-_pyserial.Serial.__init__ = _patched_serial_init
 
 from car_driver import CarController
 from audio_driver import AudioController
@@ -60,18 +40,37 @@ except Exception:
     _yolo_ok = False
     YOLO = None
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+# 机械臂(可选):https://github.com/zhanghy12/Minimal_interface_moce
+# 假设 clone 到 /home/pi/Minimal_interface_moce,pip install -e 后 physical_agent 可 import
+ARM_REPO_PATH = "/home/pi/Minimal_interface_moce"
+ARM_CONFIG_PATH = os.path.expanduser("~/Desktop/arm_config.json")
+try:
+    if os.path.isdir(os.path.join(ARM_REPO_PATH, "src")):
+        sys.path.insert(0, os.path.join(ARM_REPO_PATH, "src"))
+    from physical_agent.controller import Sts3215ArmController
+    _arm_ok = True
+except Exception:
+    _arm_ok = False
+    Sts3215ArmController = None
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 
 REC_DIR = "/home/pi/car_project/records"
 SOUND_DIR = "/home/pi/car_project/sounds"
+UPLOADS_DIR = "/home/pi/car_project/uploads"
+ALLOWED_AUDIO_EXT = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
+MAX_UPLOAD_SIZE = 30 * 1024 * 1024  # 30 MB,够一首歌
 
 car: CarController | None = None
 audio: AudioController | None = None
 camera: "CameraStreamer | None" = None
 yolo: "YOLOInferencer | None" = None
 minimap: "MiniMap | None" = None
+holder: "HoldController" = None  # type: ignore
+arm: "Sts3215ArmController | None" = None
+arm_lock = threading.Lock()
 loop: asyncio.AbstractEventLoop | None = None
 
 YOLO_MODELS_DIR = "/home/pi/yolo_env"
@@ -91,6 +90,7 @@ state: dict = {
     "recording": False,
     "rec_path": None,
     "rec_start_t": None,
+    "esp32_deadlock": False,
 }
 
 MAX_RECORDING_DURATION_S = 5 * 60  # 5 分钟自动 stop,防止前端断开导致孤儿录音
@@ -259,6 +259,8 @@ class MiniMap:
     # 速度模型常数(初始猜测,可通过 /api/map/config 实时标定)
     K_LINEAR = 0.05    # mm/s per BUTTONSPEED. BS=2000 → 100mm/s
     K_ANGULAR = 0.0006 # rad/s per BUTTONSPEED. BS=2000 → 1.2 rad/s ≈ 69°/s
+    # 重心前置 → 后驱效率低于前驱,后退速度 / 前进速度 比率
+    BACKWARD_RATIO = 0.7
     # 传感器朝向(车体局部,弧度,基于 schematic S2 左前 / S1 前 / S3 右前)
     SENSOR_YAW = {1: 0.0, 2: _math.radians(50), 3: _math.radians(-50)}
     SENSOR_OFFSET_X_MM = 50
@@ -331,7 +333,7 @@ class MiniMap:
         w = self.K_ANGULAR * self.button_speed
         vx_local = vy_local = dw = 0.0
         if a == "FORWARD":    vx_local = v
-        elif a == "BACKWARD": vx_local = -v
+        elif a == "BACKWARD": vx_local = -v * self.BACKWARD_RATIO
         elif a == "LEFT":     vy_local = v
         elif a == "RIGHT":    vy_local = -v
         elif a == "ROT_CCW":  dw = w
@@ -383,16 +385,381 @@ class MiniMap:
                 "cell_count": len(self.grid),
                 "recent_hits": list(self.recent_hits),
                 "pose_history": list(self.pose_history),
-                "config": {"k_linear": self.K_LINEAR, "k_angular": self.K_ANGULAR},
+                "config": {"k_linear": self.K_LINEAR, "k_angular": self.K_ANGULAR, "backward_ratio": self.BACKWARD_RATIO},
             }
 
-    def configure(self, *, k_linear=None, k_angular=None):
+    def configure(self, *, k_linear=None, k_angular=None, backward_ratio=None):
         with self.lock:
             if k_linear is not None:
                 self.K_LINEAR = max(0.001, min(1.0, float(k_linear)))
             if k_angular is not None:
                 self.K_ANGULAR = max(0.00001, min(0.01, float(k_angular)))
+            if backward_ratio is not None:
+                self.BACKWARD_RATIO = max(0.1, min(1.5, float(backward_ratio)))
         return self.snapshot()
+
+
+# ====================== HoldController (移动持续控制) ======================
+# 把"按住前进"逻辑从前端 setInterval 移到后端 thread,避免网络抖动让 cmd 间隔不稳。
+# 前端通过 WS 发 down/up 信号,后端持续每 100ms 给 ESP32 发指令。
+# 安全:1.5s 没 renew/up 自动 stop;WS 断开释放;急停时强制 release。
+
+class HoldController:
+    REPEAT_MS = 100
+    TIMEOUT_S = 1.5
+
+    def __init__(self):
+        # action → last_renew_t,支持多键同时 hold;_loop 在它们之间 round-robin 发 cmd
+        # (yahboom 协议是单字符互斥指令,无法原生组合,软件 RR 近似 W+Q 这种"边走边转"语义)
+        self.actions: dict[str, float] = {}
+        self.thread: threading.Thread | None = None
+        self.lock = threading.Lock()
+        self._rr_idx = 0
+
+    def hold(self, action: str):
+        with self.lock:
+            self.actions[action] = time.time()
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
+
+    def renew(self, action: str | None = None):
+        with self.lock:
+            now = time.time()
+            if action is None:
+                for k in self.actions: self.actions[k] = now
+            elif action in self.actions:
+                self.actions[action] = now
+
+    def release(self, action: str | None = None, reason: str = "up"):
+        # action 给定 → 单独移除该键(剩余 action 继续 RR);None → 全清 + 停车
+        with self.lock:
+            if action is None:
+                had_any = bool(self.actions)
+                self.actions.clear()
+            else:
+                had_any = self.actions.pop(action, None) is not None
+            empty = not self.actions
+        if had_any and empty:
+            try:
+                if car is not None: car.stop()
+            except Exception: pass
+            push_log(f"hold release ({reason})", "cmd")
+
+    def _loop(self):
+        action_fns = {
+            "forward":    "forward",
+            "backward":   "backward",
+            "left":       "left",
+            "right":      "right",
+            "rotate_cw":  "rotate_cw",
+            "rotate_ccw": "rotate_ccw",
+        }
+        interval = self.REPEAT_MS / 1000.0
+        next_t = time.monotonic()
+        while True:
+            with self.lock:
+                now = time.time()
+                # 清 timeout 的 action
+                for k in list(self.actions.keys()):
+                    if now - self.actions[k] > self.TIMEOUT_S:
+                        del self.actions[k]
+                keys = list(self.actions.keys())
+            if not keys:
+                # 全部松开/超时,停车后退出 loop
+                try:
+                    if car is not None: car.stop()
+                except Exception: pass
+                break
+            # round-robin:多键时每 100ms 切换发不同 cmd,单键时只发它自己
+            action = keys[self._rr_idx % len(keys)]
+            self._rr_idx += 1
+            try:
+                if car is not None:
+                    method_name = action_fns.get(action)
+                    if method_name:
+                        getattr(car, method_name)()
+            except Exception as e:
+                push_log(f"hold loop err: {e}", "sys")
+            next_t += interval
+            sleep_dur = next_t - time.monotonic()
+            if sleep_dur > 0:
+                time.sleep(sleep_dur)
+            else:
+                next_t = time.monotonic()
+
+
+# ====================== Recording / Playback ======================
+# 内存录制用户操作(cmd / hold 边沿)+ 传感器快照(ultra @ 10Hz, pose);支持正/倒放,
+# 进度/当前指令显示,以及"校准 visualization":回放时把录制时的 ultra/pose 跟实时数据
+# 推送给前端对比展示(自动微调 hold 时长留 Phase 2)。memory-only,服务重启清空。
+
+class RecordingController:
+    MAX_DURATION_S = 600   # 10 min 上限
+    SENSOR_HZ = 10
+    # cmd 倒放反映射(自反的写自己,音效不可逆但仍播放原音)
+    INVERSE = {
+        "forward": "backward", "backward": "forward",
+        "left":    "right",    "right":    "left",
+        "rotate_cw": "rotate_ccw", "rotate_ccw": "rotate_cw",
+        "speed_up": "speed_down", "speed_down": "speed_up",
+        "speed_reset": "speed_reset",
+        "obstacle_on": "obstacle_off", "obstacle_off": "obstacle_on",
+        "ultra_on": "ultra_off", "ultra_off": "ultra_on",
+        "emergency": "emergency", "stop": "stop",
+        "cat1": "cat1", "cat2": "cat2", "cat3": "cat3", "cat4": "cat4",
+    }
+
+    def __init__(self):
+        self.events: list[tuple[float, str, dict]] = []
+        self.t0 = 0.0
+        self.recording = False
+        self.playing = False
+        self.playback = {
+            "idx": 0, "total": 0, "elapsed": 0.0, "duration": 0.0,
+            "direction": "forward", "speed": 1.0,
+            "current": None, "calibrate": False,
+            "trail_recorded": [], "trail_replay": [],
+            "ultra_recorded": None, "ultra_live": None, "ultra_diff_mm": None,
+        }
+        self.lock = threading.Lock()
+        self.sensor_thread = None
+        self.playback_thread = None
+
+    def status(self):
+        with self.lock:
+            duration = self.events[-1][0] if self.events else 0.0
+            cmd_count = sum(1 for _, k, _ in self.events if k != "sensor")
+            return {
+                "recording": self.recording,
+                "playing": self.playing,
+                "event_count": cmd_count,
+                "total_events": len(self.events),
+                "duration_s": round(duration, 2),
+                "elapsed_s": round(time.monotonic() - self.t0, 2) if self.recording else 0.0,
+                "playback": dict(self.playback) if self.playing else None,
+            }
+
+    def start(self):
+        with self.lock:
+            if self.recording or self.playing: return (False, "already busy")
+            self.events.clear()
+            self.t0 = time.monotonic()
+            self.recording = True
+            self.sensor_thread = threading.Thread(target=self._sensor_loop, daemon=True)
+            self.sensor_thread.start()
+        push_log("recording started", "rec")
+        return (True, None)
+
+    def stop_recording(self):
+        with self.lock:
+            if not self.recording: return (False, "not recording")
+            self.recording = False
+            n = len(self.events)
+            d = self.events[-1][0] if self.events else 0.0
+        push_log(f"recording stopped: {n} events, {d:.1f}s", "rec")
+        return (True, None)
+
+    def clear(self):
+        with self.lock:
+            if self.recording or self.playing: return (False, "busy")
+            self.events.clear()
+        return (True, None)
+
+    def log_event(self, kind: str, payload: dict):
+        with self.lock:
+            if not self.recording: return
+            t = time.monotonic() - self.t0
+            if t > self.MAX_DURATION_S:
+                self.recording = False
+                push_log("recording auto-stopped: max duration", "rec")
+                return
+            self.events.append((t, kind, payload))
+
+    def _sensor_loop(self):
+        interval = 1.0 / self.SENSOR_HZ
+        next_t = time.monotonic()
+        while True:
+            with self.lock:
+                if not self.recording: break
+                t0 = self.t0
+            t = time.monotonic() - t0
+            ultra_raw = state.get("ultra") or {}
+            ultra_dist = {}
+            for k, v in ultra_raw.items():
+                if isinstance(v, dict): ultra_dist[str(k)] = v.get("distance_mm")
+            pose = None
+            if minimap is not None:
+                with minimap.lock:
+                    pose = {"x": round(minimap.x_mm, 1), "y": round(minimap.y_mm, 1),
+                            "theta": round(minimap.theta, 4)}
+            snap = {"ultra": ultra_dist, "pose": pose, "speed": state.get("speed")}
+            with self.lock:
+                if self.recording: self.events.append((t, "sensor", snap))
+            next_t += interval
+            sleep_dur = next_t - time.monotonic()
+            if sleep_dur > 0: time.sleep(sleep_dur)
+            else: next_t = time.monotonic()
+
+    def play(self, direction: str = "forward", speed: float = 1.0, calibrate: bool = False):
+        with self.lock:
+            if self.recording or self.playing: return (False, "busy")
+            if not self.events: return (False, "no recording")
+            events_snap = list(self.events)
+            duration = events_snap[-1][0]
+            trail_rec = [e[2]["pose"] for e in events_snap if e[1] == "sensor" and e[2].get("pose")]
+            self.playing = True
+            self.playback = {
+                "idx": 0, "total": sum(1 for _, k, _ in events_snap if k != "sensor"),
+                "elapsed": 0.0, "duration": duration,
+                "direction": direction, "speed": max(0.1, min(5.0, float(speed))),
+                "current": None, "calibrate": bool(calibrate),
+                "trail_recorded": trail_rec, "trail_replay": [],
+                "ultra_recorded": None, "ultra_live": None, "ultra_diff_mm": None,
+            }
+            self.playback_thread = threading.Thread(target=self._playback_loop, args=(events_snap,), daemon=True)
+            self.playback_thread.start()
+        push_log(f"playback started: {direction} x{speed}{' +cal' if calibrate else ''}", "rec")
+        return (True, None)
+
+    def stop_playback(self):
+        with self.lock:
+            if not self.playing: return (False, "not playing")
+            self.playing = False
+        try:
+            if holder is not None: holder.release()
+            if car is not None: car.stop()
+        except Exception: pass
+        push_log("playback stopped", "rec")
+        return (True, None)
+
+    def _prepare(self, events, direction):
+        # 过滤掉 sensor,只保留 cmd 类
+        cmd_only = [(t, k, p) for t, k, p in events if k != "sensor"]
+        if direction != "reverse":
+            return cmd_only
+        duration = events[-1][0] if events else 0
+        # 步骤 1:整体逆序 + cmd 反映射 + hold_down <-> hold_up 互换
+        flipped = []
+        for t, k, p in reversed(cmd_only):
+            t_r = duration - t
+            action = p.get("action") if isinstance(p, dict) else None
+            inv = self.INVERSE.get(action, action) if action else None
+            new_p = {"action": inv} if action else (p or {})
+            if k == "hold_down": flipped.append([t_r, "hold_up", new_p])
+            elif k == "hold_up": flipped.append([t_r, "hold_down", new_p])
+            else: flipped.append([t_r, k, new_p])
+        # 步骤 2:事件级 timing 补偿 — 反映射后 backward 段比原 forward 走得近(差 1/ratio),
+        # forward 段比原 backward 走得远(差 ratio)。逐 hold 段调时长,后续事件 shift。
+        ratio = (minimap.BACKWARD_RATIO if minimap is not None else 0.7)
+        ratio = max(0.05, ratio)
+        shift = 0.0
+        hold_starts = {}
+        for ev in flipped:
+            ev[0] = ev[0] + shift
+            t_adj, k, p = ev[0], ev[1], ev[2]
+            action = p.get("action") if isinstance(p, dict) else None
+            if k == "hold_down" and action:
+                hold_starts[action] = t_adj
+            elif k == "hold_up" and action and action in hold_starts:
+                t_down = hold_starts.pop(action)
+                orig = t_adj - t_down
+                if action == "backward":
+                    extra = orig * (1.0 / ratio - 1.0)
+                elif action == "forward":
+                    extra = orig * (ratio - 1.0)
+                else:
+                    extra = 0.0
+                shift += extra
+                ev[0] = t_adj + extra
+        return [tuple(e) for e in flipped]
+
+    def _playback_loop(self, events_snap):
+        with self.lock:
+            direction = self.playback["direction"]
+            speed = self.playback["speed"]
+            calibrate = self.playback["calibrate"]
+        prepared = self._prepare(events_snap, direction)
+        sensor_log = [(t, p) for t, k, p in events_snap if k == "sensor"]
+
+        def find_sensor(t_orig):
+            # 二分查找 sensor 时间最近邻
+            if not sensor_log: return None
+            best = sensor_log[0]; best_d = abs(sensor_log[0][0] - t_orig)
+            for s in sensor_log:
+                d = abs(s[0] - t_orig)
+                if d < best_d: best = s; best_d = d
+            return best[1]
+
+        start = time.monotonic()
+        i = 0
+        try:
+            while i < len(prepared):
+                with self.lock:
+                    if not self.playing: break
+                t_ev, kind, payload = prepared[i]
+                target = start + t_ev / speed
+                now = time.monotonic()
+                if target > now: time.sleep(target - now)
+                with self.lock:
+                    if not self.playing: break
+                self._dispatch(kind, payload)
+                # 校准 visualization:取原录时 t_ev 对应 sensor,跟实时 sensor 对比
+                cal_data = None
+                if calibrate:
+                    orig_t = events_snap[-1][0] - t_ev if direction == "reverse" else t_ev
+                    rec_snap = find_sensor(orig_t)
+                    if rec_snap:
+                        live_ultra = {}
+                        for k, v in (state.get("ultra") or {}).items():
+                            if isinstance(v, dict): live_ultra[str(k)] = v.get("distance_mm")
+                        rec_ultra = rec_snap.get("ultra") or {}
+                        diff = {}
+                        for sk in set(list(rec_ultra.keys()) + list(live_ultra.keys())):
+                            r = rec_ultra.get(sk); l = live_ultra.get(sk)
+                            if r is not None and l is not None:
+                                diff[sk] = l - r
+                        cal_data = {"recorded": rec_ultra, "live": live_ultra, "diff": diff}
+                with self.lock:
+                    self.playback["idx"] = i + 1
+                    self.playback["elapsed"] = t_ev
+                    self.playback["current"] = {"kind": kind, "action": payload.get("action") if isinstance(payload, dict) else None}
+                    if minimap is not None:
+                        with minimap.lock:
+                            self.playback["trail_replay"].append({"x": round(minimap.x_mm, 1), "y": round(minimap.y_mm, 1)})
+                    if cal_data:
+                        self.playback["ultra_recorded"] = cal_data["recorded"]
+                        self.playback["ultra_live"] = cal_data["live"]
+                        self.playback["ultra_diff_mm"] = cal_data["diff"]
+                i += 1
+        finally:
+            try:
+                if holder is not None: holder.release()
+                if car is not None: car.stop()
+            except Exception: pass
+            with self.lock:
+                self.playing = False
+                self.playback["current"] = None
+            push_log("playback finished", "rec")
+
+    def _dispatch(self, kind, payload):
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if not action: return
+        try:
+            if kind == "hold_down":
+                if holder: holder.hold(action)
+            elif kind == "hold_up":
+                if holder: holder.release(action)
+            elif kind == "hold_renew":
+                if holder: holder.renew(action)
+            elif kind == "cmd":
+                fn = CMD_MAP.get(action)
+                if fn: fn()
+        except Exception as e:
+            push_log(f"playback dispatch err {kind}/{action}: {e}", "rec")
+
+
+recorder: "RecordingController" = None  # type: ignore
 
 
 # ====================== YOLO inference ======================
@@ -633,6 +1000,8 @@ def push_log(line: str, kind: str = "esp32"):
     bcast({"type": "log", "data": entry})
 
 
+SOFT_AVOID_THRESHOLD_MM = 250  # 软件避障触发距离
+
 def on_ultra(data: dict):
     sid = data["sensor_id"]
     state["ultra"][sid] = {
@@ -643,6 +1012,14 @@ def on_ultra(data: dict):
     bcast({"type": "ultra", "data": state["ultra"]})
     if minimap is not None:
         minimap.on_ultra(sid, data["distance_mm"], data["has_obstacle"])
+    # 软件避障:OBSTACLE 模式启用且任一 sensor 报有障碍且距离 < 阈值 → 主动 stop
+    # (用 service 替代 ESP32 自主避障,这样 ULTRA_REPORT 和"避障"可以同时开,minimap 也能记轨迹)
+    if state["modes"].get("obstacle") and data["has_obstacle"] and data["distance_mm"] < SOFT_AVOID_THRESHOLD_MM:
+        if state["last_action"] not in ("STOP", "EMERGENCY_STOP"):
+            push_log(f"soft-avoid: S{sid} {data['distance_mm']}mm obstacle → STOP", "cmd")
+            try:
+                if car is not None: car.stop()
+            except Exception: pass
 
 
 def on_ps3_l1():
@@ -651,6 +1028,19 @@ def on_ps3_l1():
 
 def on_ps3_l2():
     push_log("PS3_L2_DOWN -> arm_action_2", "ps3")
+
+
+# 音频播放前的电流稳定 helper(防止 USB Audio 启动瞬时电流 + 电机电流叠加触发 over-current)
+# 触发场景已知:用户按猫叫/上传播放 → USB DAC 启动有 200-400mA 冲 → 跟运行中电机叠加 → 4 个 USB root port 同时 over-current 保护 → 整个 USB 崩 + ESP32 firmware deadlock
+def _audio_preflight():
+    """音频播放前的电流预防:如果车正在动,先停车 + 等总电流稳定。"""
+    if car is None: return
+    if state["last_action"] in ("FORWARD","BACKWARD","LEFT","RIGHT","ROT_CW","ROT_CCW"):
+        try:
+            car.stop()
+            push_log("audio preflight: stopped motor to avoid USB over-current", "audio")
+            time.sleep(0.25)  # 让电流稳下来
+        except Exception: pass
 
 
 def install_event_hooks():
@@ -684,15 +1074,20 @@ def install_event_hooks():
                     minimap.set_button_speed(bs)
             except Exception: pass
         elif line == "3WD-ROBOT-START":
-            # ESP32 刚刚启动(物理复位或 USB 重插)→ 1 秒后自动重新启用 ULTRA_REPORT
-            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 1s", "sys")
+            # ESP32 刚刚启动(物理复位 / RTS pulse / USB 重插)→ 3 秒后自动重启用 ULTRA_REPORT
+            # 3 秒给 BluePad32 蓝牙栈 init 时间,避免命令撞 ESP32 init phase 被丢
+            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 3s", "sys")
+            # 顺便清死锁标志(RTS 自动恢复成功的标志)
+            if state.get("esp32_deadlock"):
+                state["esp32_deadlock"] = False
+                bcast({"type": "state", "data": state})
             def _reapply():
                 try:
                     if car is not None:
                         car.ultrasonic_report_on()
                 except Exception as e:
                     push_log(f"auto re-enable ultra_report failed: {e}", "sys")
-            threading.Timer(1.0, _reapply).start()
+            threading.Timer(3.0, _reapply).start()
 
         if not line.startswith("ULTRA,"):
             push_log(line, "esp32")
@@ -714,63 +1109,91 @@ def install_event_hooks():
     }
 
     def wrapped_send(c: str):
+        # ====== 软件避障:OBSTACLE 命令转 ULTRA_REPORT + 设软避障标志 ======
+        # ESP32 firmware 把 OBSTACLE 和 ULTRA_REPORT 设成互斥,开 OBSTACLE 时:
+        #  - ESP32 不推 ULTRA 数据(UI 看不到距离/mini-map 没源)
+        #  - ESP32 自主控制车(wrapped_send 看不到方向 → minimap 记不到轨迹)
+        # 我们改成软件避障:实际启用 ULTRA_REPORT,服务端 on_ultra 检测障碍 → 发 stop。
+        if c == "o":
+            push_log("OBSTACLE_ON → soft-avoid (ULTRA_REPORT + service-side stop)", "cmd")
+            state["modes"]["obstacle"] = True
+            state["modes"]["ultra_report"] = True  # 软避障内部用 ULTRA_REPORT
+            state["last_action"] = "OBSTACLE_ON"
+            bcast({"type": "state", "data": state})
+            # 内部发 'u' 切到 ULTRA_REPORT
+            try: orig_send("u")
+            except Exception as e: push_log(f"soft-avoid enable failed: {e}", "sys")
+            return
+        if c == "p":
+            push_log("OBSTACLE_OFF (soft-avoid disabled, ULTRA_REPORT 保留)", "cmd")
+            state["modes"]["obstacle"] = False
+            state["last_action"] = "OBSTACLE_OFF"
+            bcast({"type": "state", "data": state})
+            # 不发 'p' 也不关 ultra(让数据持续)
+            return
+
         action = cmd_to_action.get(c, f"SEND({c})")
         state["last_action"] = action
         if action == "EMERGENCY_STOP":
             state["modes"]["emergency"] = True
+            state["modes"]["obstacle"] = False  # 急停同时清软避障
         elif action != "STOP":
             state["modes"]["emergency"] = False
         push_log(f"tx: {action}", "cmd")
         bcast({"type": "state", "data": state})
         if minimap is not None:
-            # 只把方向类 action 设为 current,STOP / 急停立即清零,其他保持
             if action in ("FORWARD","BACKWARD","LEFT","RIGHT","ROT_CW","ROT_CCW"):
                 minimap.set_action(action)
             elif action in ("STOP", "EMERGENCY_STOP"):
                 minimap.set_action(None)
-        # 串口写带 1 次 retry(短瞬故障常见,长故障靠 serial watchdog)
-        last_err = None
-        for attempt in range(2):
-            try:
-                orig_send(c)
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(0.05)
-        if last_err is not None:
-            push_log(f"send fail (2 attempts) {action}: {last_err}", "sys")
+        try:
+            orig_send(c)
+        except Exception as e:
+            push_log(f"send fail {action}: {e}", "sys")
 
     car.send = wrapped_send
+
+    # 包装 car.play_wav (cat1-4 走的就是它),播放前先停车减少 USB 总电流
+    orig_play_wav = car.play_wav
+    def wrapped_play_wav(wav_path):
+        _audio_preflight()
+        return orig_play_wav(wav_path)
+    car.play_wav = wrapped_play_wav
 
 
 # ====================== Lifespan ======================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global car, audio, camera, yolo, minimap, loop
+    global car, audio, camera, yolo, minimap, holder, recorder, loop
     loop = asyncio.get_running_loop()
+    holder = HoldController()
+    recorder = RecordingController()
 
     push_log("boot: initializing CarController", "sys")
-    try:
-        car = CarController(
-            ultrasonic_callback=on_ultra,
-            ps3_l1_callback=on_ps3_l1,
-            ps3_l2_callback=on_ps3_l2,
-        )
-        install_event_hooks()
-        push_log("boot: car ready", "sys")
-        # 默认启用 ULTRA_REPORT,让超声波数据开箱即用。
-        # 用户切到 OBSTACLE 模式时 setObs(true) 会先 ultra_off 再 obstacle_on(互斥已处理)。
+    car = None
+    for attempt in range(3):
         try:
-            await asyncio.sleep(0.3)
-            car.ultrasonic_report_on()
-            push_log("boot: enabled ULTRA_REPORT by default", "sys")
+            car = CarController(
+                ultrasonic_callback=on_ultra,
+                ps3_l1_callback=on_ps3_l1,
+                ps3_l2_callback=on_ps3_l2,
+            )
+            install_event_hooks()
+            push_log(f"boot: car ready (attempt {attempt+1})", "sys")
+            break
         except Exception as e:
-            push_log(f"boot: ultra_report auto-enable failed: {e}", "sys")
-    except Exception as e:
-        push_log(f"boot: car FAILED: {e}", "sys")
-        car = None
+            push_log(f"boot: car init attempt {attempt+1} failed: {e}", "sys")
+            await asyncio.sleep(3)
+    if car is not None:
+        # 等 5s 给 ESP32 BluePad32 蓝牙栈充分 init,降低首次 'u' 撞 init phase 导致丢命令的概率
+        # 如果还失败,_ultra_keepalive 会接管 retry。
+        try:
+            await asyncio.sleep(5.0)
+            car.ultrasonic_report_on()
+            push_log("boot: sent ULTRA_REPORT_ON after 5s wait", "sys")
+        except Exception as e:
+            push_log(f"boot: initial ultra_report send failed: {e}", "sys")
 
     push_log("boot: initializing AudioController", "sys")
     try:
@@ -814,67 +1237,6 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
-    # ---- ESP32 串口故障检测 + 自动重连(覆盖三种场景)----
-    # 1) 开机时 car init 就失败 (USB 没插好 / ESP32 没上电) → 重试 init
-    # 2) 运行中 USB 拔了 / 串口失效 → reopen
-    # 3) ESP32 firmware 复位但 host serial 还有效 → 不动 (reader 会自己收数据)
-    async def _serial_watchdog():
-        nonlocal_dummy = None  # placeholder
-        global car
-        consec_fail = 0
-        while True:
-            try:
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                return
-            # 场景 1: car 整个没初始化成功 → 重试 CarController()
-            if car is None:
-                try:
-                    push_log("serial watchdog: trying CarController init...", "sys")
-                    new_car = CarController(
-                        ultrasonic_callback=on_ultra,
-                        ps3_l1_callback=on_ps3_l1,
-                        ps3_l2_callback=on_ps3_l2,
-                    )
-                    car = new_car
-                    install_event_hooks()
-                    push_log("serial watchdog: car initialized after retry", "sys")
-                    consec_fail = 0
-                    try:
-                        await asyncio.sleep(0.3)
-                        car.ultrasonic_report_on()
-                        push_log("serial watchdog: re-enabled ULTRA_REPORT", "sys")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    consec_fail += 1
-                    push_log(f"serial watchdog: car init failed #{consec_fail}: {e}", "sys")
-                continue
-            # 场景 2: car 存在但串口探测异常 → close + reopen
-            try:
-                if car.ser is None or not car.ser.is_open:
-                    raise IOError("ser not open")
-                _ = car.ser.in_waiting
-                _ = car.ser.port
-                consec_fail = 0
-                continue
-            except Exception as e:
-                consec_fail += 1
-                push_log(f"serial watchdog: fault #{consec_fail}: {e}", "sys")
-            try: car.ser.close()
-            except Exception: pass
-            await asyncio.sleep(min(2 + consec_fail, 10))
-            try:
-                new_ser = _pyserial.Serial(
-                    port=car.port, baudrate=car.baudrate, timeout=0.1,
-                )
-                car.ser = new_ser
-                push_log(f"serial watchdog: reconnected ({car.port})", "sys")
-                consec_fail = 0
-            except Exception as e2:
-                push_log(f"serial watchdog: reconnect failed: {e2}", "sys")
-    _sw_task = asyncio.create_task(_serial_watchdog())
-
     # ---- 录音超时:5 分钟自动 stop,防止前端断开/标签关闭导致 arecord 孤儿 ----
     async def _rec_timeout_watcher():
         while True:
@@ -898,6 +1260,105 @@ async def lifespan(app: FastAPI):
                     push_log(f"audio auto-stop err: {e}", "sys")
     _rt_task = asyncio.create_task(_rec_timeout_watcher())
 
+    # ---- ULTRA_REPORT keep-alive + 自动恢复 (RTS pulse → ESP32 EN reset) ----
+    # 流程:
+    #   1) ESP32 沉默 > 12s → 温和重发 'u'
+    #   2) 连续 3 次重发都沉默 → 设 esp32_deadlock=True + 自动尝试 RTS pulse 让 ESP32 cold reset
+    #      (yahboom 板 CH340 RTS 通常经反相接 ESP32 EN,toggle 等于按 RST 按钮)
+    #   3) 等 8s 给 ESP32 boot,如果还是沉默 → 再 pulse 一次(最多 3 次)
+    #   4) 3 次自动都救不回 → banner 引导用户关车电池(物理层最后兜底)
+    async def _esp32_rts_pulse():
+        """RTS 脉冲模拟按 ESP32 RST 按钮。需要 yahboom 板把 CH340 RTS 接 ESP32 EN(经反相电路)。"""
+        if car is None or car.ser is None or not car.ser.is_open:
+            return False
+        try:
+            # 序列:DTR 保持 release(IO0=HIGH 防止进 download mode)
+            #       RTS pulse LOW→HIGH→LOW 触发 EN reset
+            car.ser.setDTR(False)
+            car.ser.setRTS(True)    # EN=LOW (reset 触发)
+            await asyncio.sleep(0.12)
+            car.ser.setRTS(False)   # EN=HIGH 释放,ESP32 开始 boot
+            return True
+        except Exception as e:
+            push_log(f"RTS pulse failed: {e}", "sys")
+            return False
+
+    async def _ultra_keepalive():
+        last_reattempt = 0
+        REATTEMPT_INTERVAL = 10.0
+        ESP32_SILENT_THRESHOLD_MS = 12000
+        DEADLOCK_AFTER_ATTEMPTS = 3
+        MAX_AUTO_RESET = 3
+        consec_attempts = 0
+        auto_reset_count = 0
+        post_reset_wait_until = 0
+        while True:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            if car is None: continue
+            if state["modes"]["obstacle"] or state["modes"]["emergency"]: continue
+            # 如果在 reset 之后还在等 ESP32 boot 起来,跳过这一轮
+            if time.time() < post_reset_wait_until: continue
+            age_ms = (time.time() - t_last_esp32) * 1000 if t_last_esp32 else 99999
+            if age_ms < ESP32_SILENT_THRESHOLD_MS:
+                # ESP32 在喘气 → 清死锁标志 + 计数器
+                consec_attempts = 0
+                auto_reset_count = 0
+                if state["esp32_deadlock"]:
+                    state["esp32_deadlock"] = False
+                    push_log("ESP32 alive again, deadlock cleared", "sys")
+                    bcast({"type": "state", "data": state})
+                continue
+            now = time.time()
+            if now - last_reattempt < REATTEMPT_INTERVAL: continue
+            last_reattempt = now
+            consec_attempts += 1
+            push_log(f"keep-alive #{consec_attempts}: ESP32 silent {int(age_ms)}ms, resending 'u'", "sys")
+            try: car.ultrasonic_report_on()
+            except Exception as e:
+                push_log(f"keep-alive resend failed: {e}", "sys")
+
+            if consec_attempts >= DEADLOCK_AFTER_ATTEMPTS:
+                if not state["esp32_deadlock"]:
+                    state["esp32_deadlock"] = True
+                    push_log(f"ESP32 DEADLOCK detected ({consec_attempts} silent retries)", "sys")
+                    bcast({"type": "state", "data": state})
+                # 自动 RTS 恢复:最多尝试 MAX_AUTO_RESET 次
+                if auto_reset_count < MAX_AUTO_RESET:
+                    auto_reset_count += 1
+                    push_log(f"auto-recovery #{auto_reset_count}/{MAX_AUTO_RESET}: pulsing RTS to reset ESP32", "sys")
+                    ok = await _esp32_rts_pulse()
+                    if ok:
+                        # 给 ESP32 8s 跑完 boot + BluePad32 init
+                        post_reset_wait_until = time.time() + 8
+                        # boot 完后会自动收到 3WD-ROBOT-START → wrapped_handle 触发 ultra_report_on
+                else:
+                    # 自动恢复用完了,只能靠用户物理操作 — banner 已经在
+                    pass
+
+    _ka_task = asyncio.create_task(_ultra_keepalive())
+
+    # 把 reset 函数暴露给手动 endpoint 用
+    app.state.esp32_rts_pulse = _esp32_rts_pulse
+
+    # ---- 机械臂可选初始化 ----
+    global arm
+    if not _arm_ok:
+        push_log("boot: arm disabled (physical_agent not installed)", "sys")
+    elif not os.path.exists(ARM_CONFIG_PATH):
+        push_log(f"boot: arm disabled (config missing at {ARM_CONFIG_PATH})", "sys")
+    else:
+        try:
+            arm_ctrl = Sts3215ArmController.from_json(ARM_CONFIG_PATH)
+            arm_ctrl.connect()
+            arm = arm_ctrl
+            push_log("boot: arm ready", "sys")
+        except Exception as e:
+            push_log(f"boot: arm init failed: {e}", "sys")
+            arm = None
+
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
     minimap.start()
@@ -913,16 +1374,42 @@ async def lifespan(app: FastAPI):
             except Exception: pass
     _mm_task = asyncio.create_task(_minimap_pusher())
 
+    # WS push recorder state every 200ms (录制/回放进度;静默时也 push 让 UI 状态同步)
+    async def _recorder_pusher():
+        while True:
+            await asyncio.sleep(0.2)
+            if not clients or recorder is None: continue
+            try: await _broadcast({"type": "rec", "data": recorder.status()})
+            except Exception: pass
+    _rec_task = asyncio.create_task(_recorder_pusher())
+
     push_log("system online", "sys")
     yield
     push_log("system shutdown", "sys")
     _mm_task.cancel()
-    _sw_task.cancel()
     _rt_task.cancel()
+    _ka_task.cancel()
+    _rec_task.cancel()
+
+    # 每个 obj.close() 包到独立 thread,5s timeout,防止某个 close 阻塞 → SIGKILL → 留 driver state 尾巴
+    def _safe_close(obj, name):
+        try:
+            (obj.close() if hasattr(obj, "close") else obj.stop())
+        except Exception as e:
+            print(f"[shutdown] {name} close error: {e}")
+
+    # car 优先 close,确保 ser.close() 在 SIGKILL 前完成
+    # arm.disconnect() 先做(servo disable_torque 需要时间)
+    if arm is not None:
+        try: arm.disconnect()
+        except Exception: pass
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
-        try: obj.close() if hasattr(obj, "close") else obj.stop()
-        except Exception: pass
+        t = threading.Thread(target=_safe_close, args=(obj, name), daemon=True)
+        t.start()
+        t.join(timeout=5)
+        if t.is_alive():
+            print(f"[shutdown] {name} close took >5s, skipping")
 
 
 API_DESCRIPTION = """
@@ -962,7 +1449,116 @@ app = FastAPI(
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
-    return HTMLResponse(INDEX_HTML)
+    # no-store 让浏览器每次刷新都拉新 HTML,deploy 后无需用户 hard refresh
+    return HTMLResponse(INDEX_HTML, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    })
+
+
+@app.get("/api/arm/status", tags=["arm"], summary="机械臂状态(关节角度 / 末端 xyz)")
+async def arm_status():
+    if arm is None:
+        reason = "physical_agent missing" if not _arm_ok else \
+                 (f"config missing: {ARM_CONFIG_PATH}" if not os.path.exists(ARM_CONFIG_PATH) else "init failed")
+        return {"available": _arm_ok, "connected": False, "reason": reason}
+    def _read():
+        with arm_lock:
+            return arm.read_state()
+    try:
+        st = await asyncio.to_thread(_read)
+        return {"available": True, "connected": arm.is_connected, **st}
+    except Exception as e:
+        return {"available": True, "connected": False, "error": str(e)}
+
+
+@app.post("/api/arm/home", tags=["arm"], summary="所有关节回零")
+async def arm_home(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json() if int(req.headers.get("content-length", "0") or 0) > 0 else {}
+    speed = body.get("speed_deg_s")
+    def _do():
+        with arm_lock:
+            return arm.home(speed_deg_s=speed)
+    return await asyncio.to_thread(_do)
+
+
+@app.post("/api/arm/nudge_cartesian", tags=["arm"], summary="末端笛卡尔增量移动(米)",
+          description="body: `{dx: float (m), dy: float, dz: float, speed_deg_s?: float}`。例: `{\"dx\": 0.01}` 沿 +x 走 10mm")
+async def arm_nudge_cartesian(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    dx = float(body.get("dx", 0))
+    dy = float(body.get("dy", 0))
+    dz = float(body.get("dz", 0))
+    speed = body.get("speed_deg_s")
+    def _do():
+        with arm_lock:
+            return arm.nudge_cartesian(dx, dy, dz, speed_deg_s=speed)
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/move_cartesian", tags=["arm"], summary="末端笛卡尔绝对位置(米)",
+          description="body: `{x, y, z, speed_deg_s?}`")
+async def arm_move_cartesian(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.move_cartesian(
+                float(body["x"]), float(body["y"]), float(body["z"]),
+                speed_deg_s=body.get("speed_deg_s"),
+            )
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/nudge_joint", tags=["arm"], summary="单关节增量",
+          description="body: `{joint: 'joint_1', delta_deg: float, speed_deg_s?: float}`")
+async def arm_nudge_joint(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.nudge_joint(body["joint"], float(body["delta_deg"]), speed_deg_s=body.get("speed_deg_s"))
+    try:
+        goal = await asyncio.to_thread(_do)
+        return {"ok": True, "joint": body["joint"], "goal_raw": goal}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/gripper", tags=["arm"], summary="夹爪开/合(增量)",
+          description="body: `{delta_deg: float, speed_deg_s?: float}`。正值通常 open,负值 close。")
+async def arm_gripper(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.nudge_gripper(float(body.get("delta_deg", 5)), speed_deg_s=body.get("speed_deg_s"))
+    try:
+        goal = await asyncio.to_thread(_do)
+        return {"ok": True, "goal_raw": goal}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/system/esp32_reset", tags=["state"], summary="用 RTS 脉冲 cold-reset ESP32 (等价按板上 RST 按钮)",
+          description="yahboom 板 CH340 RTS 通常经反相接 ESP32 EN。toggle 让 ESP32 重启 firmware,不进 download mode。如果板子没接这个引脚,无效但无害。")
+async def system_esp32_reset(req: Request):
+    if car is None or car.ser is None or not car.ser.is_open:
+        raise HTTPException(503, "serial port not open")
+    pulse = getattr(app.state, "esp32_rts_pulse", None)
+    if pulse is None:
+        raise HTTPException(503, "rts pulse helper not initialized")
+    ok = await pulse()
+    push_log(f"manual ESP32 RTS pulse: {'ok' if ok else 'failed'}", "sys")
+    return {"ok": ok, "msg": "RTS pulsed; ESP32 booting (5-10s); ULTRA_REPORT will auto re-enable on 3WD-ROBOT-START"}
 
 
 @app.post("/api/system/restart", tags=["state"], summary="重启 robot-console.service",
@@ -1103,6 +1699,11 @@ async def health():
                             f"{len(minimap.grid)} cells · {len(minimap.pose_history)} trail")}
                 if minimap else {"ok": False, "detail": "not initialized"}
             ),
+            "arm": (
+                {"ok": arm.is_connected, "detail": f"{len(arm.online_joint_names)} joints online"}
+                if arm else
+                {"ok": False, "detail": ("physical_agent missing" if not _arm_ok else "not configured")}
+            ),
         },
         "system": {
             "cpu_temp_c": cpu_temp,
@@ -1144,14 +1745,62 @@ CMD_MAP = {
 @app.post("/api/cmd/{action}", tags=["control"], summary="发送单条车辆/避障/音效/速度指令",
           description=("**有效 action**:\n\n"
                        "- 运动: `forward` `backward` `left` `right` `rotate_cw` `rotate_ccw` `stop`\n"
-                       "- 避障: `obstacle_on` `obstacle_off` (与 ultra 互斥)\n"
+                       "- 避障: `obstacle_on` `obstacle_off`(软件避障,跟 ultra 兼容)\n"
                        "- 超声波上报: `ultra_on` `ultra_off`\n"
                        "- 急停: `emergency`\n"
                        "- 速度: `speed_up` `speed_down` `speed_reset`\n"
-                       "- 音效: `cat1` `cat2` `cat3` `cat4`\n"))
-async def cmd(action: str):
+                       "- 音效: `cat1` `cat2` `cat3` `cat4`\n\n"
+                       "**持续模式 query params**(优先级 angle > distance > duration):\n"
+                       "- `?duration=N` 持续 N 秒(最长 60)\n"
+                       "- `?distance=N` 行驶 N **mm**(仅 forward/backward/left/right,基于 minimap K_LINEAR + 当前 BUTTON_SPEED 换算)\n"
+                       "- `?angle=N` 转动 N **度**(仅 rotate_cw/rotate_ccw,基于 minimap K_ANGULAR)\n\n"
+                       "持续模式期间用后端 100ms 绝对时间步进给 ESP32 发 cmd,HTTP 阻塞直到完成。\n"
+                       "例:`curl -X POST 'http://pi:8000/api/cmd/forward?distance=500'` 直走 500mm 自停。\n"))
+async def cmd(action: str, duration: float = 0, distance: float = 0, angle: float = 0):
     if car is None:
         raise HTTPException(503, "car not ready")
+    HOLD_LINEAR = {"forward","backward","left","right"}
+    HOLD_ROTATE = {"rotate_cw","rotate_ccw"}
+    HOLD_ACTIONS = HOLD_LINEAR | HOLD_ROTATE
+
+    # 优先级:angle > distance > duration
+    d_s = 0.0
+    mode_detail = None
+    if angle > 0:
+        if action not in HOLD_ROTATE:
+            raise HTTPException(400, f"angle only valid for rotate_cw / rotate_ccw")
+        bs = state.get("speed") or 2000
+        k_a = (minimap.K_ANGULAR if minimap else 0.0006)
+        omega_deg_s = max(1.0, _math.degrees(k_a * bs))
+        d_s = float(angle) / omega_deg_s
+        mode_detail = f"angle={angle}° (est {omega_deg_s:.1f}°/s)"
+    elif distance > 0:
+        if action not in HOLD_LINEAR:
+            raise HTTPException(400, f"distance only valid for forward/backward/left/right")
+        bs = state.get("speed") or 2000
+        k_l = (minimap.K_LINEAR if minimap else 0.05)
+        ratio = (minimap.BACKWARD_RATIO if minimap else 0.7) if action == "backward" else 1.0
+        v_mm_s = max(1.0, k_l * bs * ratio)
+        d_s = float(distance) / v_mm_s
+        mode_detail = f"distance={distance}mm (est {v_mm_s:.1f}mm/s, ratio×{ratio})"
+    elif duration > 0:
+        if action not in HOLD_ACTIONS:
+            raise HTTPException(400, f"duration only valid for hold-able actions: {sorted(HOLD_ACTIONS)}")
+        d_s = float(duration)
+        mode_detail = f"duration={duration}s"
+
+    if d_s > 0:
+        if holder is None:
+            raise HTTPException(503, "holder not ready")
+        d_s = max(0.05, min(60.0, d_s))
+        holder.hold(action)
+        end = time.time() + d_s
+        while time.time() < end:
+            await asyncio.sleep(min(0.5, end - time.time()))
+            holder.renew(action)
+        holder.release(reason=f"{mode_detail} ended")
+        return {"ok": True, "action": action, "actual_duration_s": round(d_s, 3), "mode": "hold", "detail": mode_detail}
+
     fn = CMD_MAP.get(action)
     if not fn:
         raise HTTPException(404, f"unknown action: {action}")
@@ -1160,7 +1809,8 @@ async def cmd(action: str):
     except Exception as e:
         push_log(f"cmd error: {action}: {e}", "sys")
         raise HTTPException(500, str(e))
-    return {"ok": True, "action": action}
+    if recorder is not None: recorder.log_event("cmd", {"action": action})
+    return {"ok": True, "action": action, "mode": "single"}
 
 
 @app.get("/api/map/state", tags=["map"], summary="MiniMap pose + 占用栅格快照",
@@ -1177,6 +1827,59 @@ async def map_reset():
         raise HTTPException(503, "minimap not initialized")
     minimap.reset()
     push_log("minimap reset", "sys")
+    return {"ok": True}
+
+
+@app.get("/api/rec/status", tags=["rec"], summary="录制 / 回放状态")
+async def rec_status():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    return recorder.status()
+
+
+@app.post("/api/rec/start", tags=["rec"], summary="开始录制 - 清空已有事件",
+          description="录制 cmd + hold_down/hold_up + 10Hz 传感器快照(ultra/pose/speed)。仅内存,服务重启清空。10 分钟上限。")
+async def rec_start():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.start()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/stop", tags=["rec"], summary="停止录制")
+async def rec_stop():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.stop_recording()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True, "status": recorder.status()}
+
+
+@app.post("/api/rec/clear", tags=["rec"], summary="清空录制(仅在 idle 时)")
+async def rec_clear():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.clear()
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/play", tags=["rec"], summary="开始回放",
+          description=("query params:\n"
+                       "- `direction`: `forward`(默认)/`reverse`\n"
+                       "- `speed`: 0.1 - 5.0 倍速\n"
+                       "- `calibrate`: 1 启用校准 visualization(回放时推送录制 vs 实时 ultra 偏差)\n"))
+async def rec_play(direction: str = "forward", speed: float = 1.0, calibrate: int = 0):
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    if direction not in ("forward", "reverse"):
+        raise HTTPException(400, "direction must be forward or reverse")
+    ok, err = recorder.play(direction=direction, speed=speed, calibrate=bool(calibrate))
+    if not ok: raise HTTPException(409, err)
+    return {"ok": True}
+
+
+@app.post("/api/rec/stop_playback", tags=["rec"], summary="终止回放")
+async def rec_stop_playback():
+    if recorder is None: raise HTTPException(503, "recorder not initialized")
+    ok, err = recorder.stop_playback()
+    if not ok: raise HTTPException(409, err)
     return {"ok": True}
 
 
@@ -1281,8 +1984,8 @@ async def list_recordings():
     return {"items": items[:30]}
 
 
-@app.post("/api/audio/play", tags=["audio"], summary="播放指定 wav",
-          description="body: `{name: \"xxx.wav\", src: \"recordings\"|\"sounds\"}`")
+@app.post("/api/audio/play", tags=["audio"], summary="播放指定音频(支持 wav/mp3/ogg/flac/m4a)",
+          description="body: `{name: \"xxx\", src: \"recordings\"|\"sounds\"|\"uploads\"}`。所有格式走 ffmpeg → ALSA。")
 async def audio_play(req: Request):
     if audio is None:
         raise HTTPException(503, "audio not ready")
@@ -1291,12 +1994,25 @@ async def audio_play(req: Request):
     src = body.get("src", "recordings")
     if "/" in name or ".." in name or not name:
         raise HTTPException(400, "bad name")
-    base = REC_DIR if src == "recordings" else SOUND_DIR
+    dirs = {"recordings": REC_DIR, "sounds": SOUND_DIR, "uploads": UPLOADS_DIR}
+    base = dirs.get(src)
+    if base is None:
+        raise HTTPException(400, "bad src")
     full = os.path.join(base, name)
     if not os.path.exists(full):
         raise HTTPException(404, "not found")
+    import subprocess as _sp
+    _audio_preflight()  # 减少 USB 总电流防过流
     try:
-        audio.play_wav(full)
+        # 用 ffmpeg 直接输出 ALSA,任何格式都通(wav/mp3/ogg/flac/m4a/aac),
+        # 进程句柄记到 audio.play_process 让 stop_playback 能 kill 它
+        with audio.play_lock:
+            audio._stop_playback_locked()
+            audio.play_process = _sp.Popen(
+                ["ffmpeg", "-loglevel", "quiet", "-nostdin",
+                 "-i", full, "-f", "alsa", audio.audio_device],
+                stdin=_sp.DEVNULL,
+            )
     except Exception as e:
         raise HTTPException(500, str(e))
     push_log(f"play: {src}/{name}", "audio")
@@ -1357,6 +2073,85 @@ async def set_volume(req: Request):
         "mic": _amixer_get("Mic"),
     }})
     return out
+
+
+@app.post("/api/audio/upload", tags=["audio"], summary="上传 mp3/wav/ogg/flac 等音频到 ~/car_project/uploads/",
+          description="multipart/form-data。允许扩展名: mp3/wav/ogg/flac/m4a/aac。最大 30MB。")
+async def audio_upload(file: UploadFile = File(...)):
+    name = file.filename or ""
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in ALLOWED_AUDIO_EXT:
+        raise HTTPException(400, f"unsupported ext {ext}; allowed: {sorted(ALLOWED_AUDIO_EXT)}")
+    safe = os.path.basename(name)
+    if "/" in safe or ".." in safe or not safe:
+        raise HTTPException(400, "bad filename")
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    dest = os.path.join(UPLOADS_DIR, safe)
+    size = 0
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk: break
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE:
+                    f.close()
+                    try: os.unlink(dest)
+                    except Exception: pass
+                    raise HTTPException(413, f"file too large (>{MAX_UPLOAD_SIZE//1024//1024}MB)")
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    push_log(f"upload: {safe} ({size//1024} KB)", "audio")
+    return {"ok": True, "name": safe, "size": size, "path": dest}
+
+
+@app.get("/api/audio/uploads", tags=["audio"], summary="列出已上传的音乐")
+async def list_uploads():
+    if not os.path.isdir(UPLOADS_DIR):
+        return {"items": []}
+    items = []
+    for fn in os.listdir(UPLOADS_DIR):
+        if os.path.splitext(fn)[1].lower() not in ALLOWED_AUDIO_EXT: continue
+        full = os.path.join(UPLOADS_DIR, fn)
+        try: st = os.stat(full)
+        except OSError: continue
+        items.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"items": items[:50]}
+
+
+@app.delete("/api/audio/upload/{name}", tags=["audio"], summary="删除单个上传文件")
+async def delete_upload(name: str):
+    if "/" in name or ".." in name or not name:
+        raise HTTPException(400, "bad name")
+    p = os.path.join(UPLOADS_DIR, name)
+    if not os.path.exists(p):
+        raise HTTPException(404, "not found")
+    try:
+        os.unlink(p)
+        push_log(f"upload deleted: {name}", "audio")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/recordings", tags=["audio"], summary="清空所有录音(只删 *.wav)")
+async def clear_recordings():
+    if not os.path.isdir(REC_DIR):
+        return {"ok": True, "removed": 0}
+    n = 0; err = 0
+    for fn in os.listdir(REC_DIR):
+        if not fn.endswith(".wav"): continue
+        try:
+            os.unlink(os.path.join(REC_DIR, fn))
+            n += 1
+        except Exception:
+            err += 1
+    push_log(f"recordings cleared: {n} files removed, {err} errors", "audio")
+    return {"ok": True, "removed": n, "errors": err}
 
 
 @app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放 (audio_driver 和 car_driver 两路 aplay 都 kill)")
@@ -1446,8 +2241,23 @@ async def ws_endpoint(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 m = json.loads(msg)
-                if m.get("type") == "ping":
+                t = m.get("type")
+                if t == "ping":
                     await websocket.send_text(json.dumps({"type": "pong", "t": now_ms()}))
+                elif t == "hold" and holder is not None:
+                    # 后端管 hold thread,前端只发 down/renew/up 边沿
+                    st = m.get("state")
+                    act = m.get("action")
+                    if st == "down" and act:
+                        holder.hold(act)
+                        if recorder is not None: recorder.log_event("hold_down", {"action": act})
+                    elif st == "renew":
+                        holder.renew(act)
+                        # renew 不录(高频且对回放无信息量,playback 内部会自行 renew)
+                    elif st == "up":
+                        # 带 act = 单键释放(剩余 action 继续 RR);不带 = 全清(兜底)
+                        holder.release(act)
+                        if recorder is not None: recorder.log_event("hold_up", {"action": act})
             except Exception:
                 pass
     except WebSocketDisconnect:
@@ -1456,6 +2266,9 @@ async def ws_endpoint(websocket: WebSocket):
         pass
     finally:
         clients.discard(websocket)
+        # WS 断开 = 该客户端不再 hold,主动 release 防止 zombie
+        if holder is not None and len(clients) == 0:
+            holder.release(reason="last ws disconnect")
 
 
 # ====================== HTML ======================
@@ -1516,10 +2329,36 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 }
 .panel-head::before{content:"▸";margin-right:8px}
 .panel-head .ph-r{margin-left:auto;color:var(--text-dim);font-size:9px;letter-spacing:.2em}
+.tab-btn{margin-left:8px;background:transparent;border:none;color:var(--text-mute);
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;
+  padding:2px 6px;cursor:pointer;text-transform:uppercase;border-bottom:2px solid transparent}
+.tab-btn.active{color:var(--amber);border-bottom-color:var(--amber)}
+.tab-btn:hover:not(.active){color:var(--amber-l)}
+.tab-content{display:flex;flex-direction:column;flex:1;gap:12px;min-height:0}
 .map-reset-btn{margin-left:10px;background:transparent;border:1px solid var(--line2);
   color:var(--text-dim);font-family:var(--font-mono);font-size:9px;letter-spacing:.15em;
   padding:2px 8px;cursor:pointer;text-transform:uppercase;height:18px}
 .map-reset-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.06)}
+
+/* Recording panel */
+.rec-progress-row{display:flex;align-items:center;gap:8px}
+.rec-progress-track{flex:1;height:4px;background:#1a1610;border:1px solid var(--line2);position:relative;overflow:hidden}
+.rec-progress-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#ffb000,#ff8800);width:0%;transition:width .15s}
+.rec-progress-meta{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em;min-width:90px;text-align:right}
+.rec-current{font-family:var(--font-mono);font-size:11px;color:var(--amber);letter-spacing:.18em;padding:4px 8px;
+  background:rgba(255,176,0,.07);border-left:2px solid var(--amber);text-transform:uppercase}
+.cal-toggle{display:flex;align-items:center;gap:8px;margin-top:8px;font-family:var(--font-mono);
+  font-size:10px;color:var(--text-dim);letter-spacing:.15em;text-transform:uppercase;cursor:pointer}
+.cal-toggle input{margin:0;accent-color:var(--amber)}
+.rec-cal-diff{margin-top:6px;font-family:var(--font-mono);font-size:10px}
+.rec-cal-row{display:grid;grid-template-columns:40px 1fr 1fr 1fr;gap:6px;padding:2px 0;color:var(--text-dim);align-items:center}
+.rec-cal-row>span:first-child{color:var(--amber);letter-spacing:.1em}
+.rec-cal-row>span:nth-child(2){color:#5af0ff}
+.rec-cal-row>span:nth-child(3){color:#7fff5a}
+.rec-cal-row>span:last-child{color:var(--text-bright);text-align:right;font-variant-numeric:tabular-nums}
+#btnRecToggle.recording{background:rgba(255,58,46,.15);border-color:#ff3a2e;color:#ff7a6e}
+#btnRecToggle.recording::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff3a2e;margin-right:6px;animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .panel-body{padding:12px;flex:1;overflow:hidden;position:relative;display:flex;flex-direction:column;gap:10px}
 
 header{grid-area:head;background:linear-gradient(90deg,#1a1410,#15110b 50%,#1a1410);
@@ -1719,6 +2558,20 @@ svg.schem{width:100%;height:100%;display:block}
 </style>
 </head>
 <body>
+<div id="deadlockBanner" style="display:none;position:fixed;top:0;left:0;right:0;
+  background:linear-gradient(90deg,#a8221a,#ff3a2e,#a8221a);color:#0b0907;
+  text-align:center;padding:12px 20px;font-weight:800;letter-spacing:.2em;z-index:9999;
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11.5px;
+  border-bottom:2px solid #0b0907;text-transform:uppercase;line-height:1.5">
+  ⚠ ESP32 FIRMWARE DEADLOCK · auto-recovery exhausted<br>
+  <span style="font-weight:500;letter-spacing:.12em">
+    try
+    <button id="btnTryRtsReset" style="background:#0b0907;color:#ff3a2e;border:1px solid #0b0907;padding:3px 10px;font-family:inherit;font-size:11px;font-weight:700;letter-spacing:.15em;cursor:pointer;margin:0 4px;text-transform:uppercase">⟳ RTS RESET</button>
+    again, or
+    <b>car battery OFF → wait 5s → ON → click RESTART</b>
+  </span>
+</div>
+
 <div id="app">
   <header>
     <div class="h-brand">ROBOT_CTRL</div>
@@ -1826,6 +2679,9 @@ svg.schem{width:100%;height:100%;display:block}
 
           <!-- Mini-map world layers (动态由 JS 渲染,ego-centric: 车在 (200,200) 朝上) -->
           <polyline id="worldTrail" fill="none" stroke="#5af0ff" stroke-width="1.2" stroke-opacity="0.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- 回放叠加层:录制时轨迹(灰虚)+ 回放时实际轨迹(亮青) -->
+          <polyline id="recordedTrail" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.7" stroke-linecap="round"/>
+          <polyline id="replayTrail" fill="none" stroke="#ffb000" stroke-width="1.8" stroke-opacity="0.95" stroke-linecap="round"/>
           <g id="worldOcc"></g>
           <g id="worldHits"></g>
           <g id="originMarker" style="display:none">
@@ -1895,8 +2751,15 @@ svg.schem{width:100%;height:100%;display:block}
   </section>
 
   <section class="panel pane-deck">
-    <div class="panel-head">INPUT DECK · MANUAL OVERRIDE <span class="ph-r" id="lastActChip">STOP</span></div>
+    <div class="panel-head">
+      INPUT DECK
+      <button class="tab-btn active" data-tab="drive">DRIVE</button>
+      <button class="tab-btn" data-tab="arm">ARM</button>
+      <button class="tab-btn" data-tab="rec">REC</button>
+      <span class="ph-r" id="lastActChip">STOP</span>
+    </div>
     <div class="panel-body">
+      <div class="tab-content" id="tab-drive">
       <div class="deck-status">
         <div class="stat-card" id="cardLast">
           <div class="stat-label">LAST_ACTION</div>
@@ -1940,6 +2803,107 @@ svg.schem{width:100%;height:100%;display:block}
       </div>
 
       <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
+      </div><!-- /tab-drive -->
+
+      <div class="tab-content" id="tab-arm" style="display:none">
+        <div class="deck-status" style="grid-template-columns:repeat(3,1fr)">
+          <div class="stat-card"><div class="stat-label">X mm</div><div class="stat-val" id="armX">--</div></div>
+          <div class="stat-card"><div class="stat-label">Y mm</div><div class="stat-val" id="armY">--</div></div>
+          <div class="stat-card"><div class="stat-label">Z mm</div><div class="stat-val" id="armZ">--</div></div>
+        </div>
+
+        <div>
+          <div class="sec-label">CARTESIAN · ±10mm</div>
+          <div class="key-grid" style="grid-template-columns:repeat(3,1fr);grid-template-rows:48px 48px">
+            <div class="key" data-arm-nudge="x+">+X<small>FRONT</small></div>
+            <div class="key" data-arm-nudge="z+">+Z<small>UP</small></div>
+            <div class="key" data-arm-nudge="y+">+Y<small>LEFT</small></div>
+            <div class="key" data-arm-nudge="x-">−X<small>BACK</small></div>
+            <div class="key" data-arm-nudge="z-">−Z<small>DOWN</small></div>
+            <div class="key" data-arm-nudge="y-">−Y<small>RIGHT</small></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="sec-label">GRIPPER · ±5°</div>
+          <div class="btn-row btn-2">
+            <button class="btn" data-arm-act="gripper-open"><span>◐ OPEN</span><span class="badge">+5°</span></button>
+            <button class="btn" data-arm-act="gripper-close"><span>◑ CLOSE</span><span class="badge">−5°</span></button>
+          </div>
+        </div>
+
+        <div class="btn-row btn-2">
+          <button class="btn" data-arm-act="home"><span>⌂ HOME</span><span class="badge">all zero</span></button>
+          <div class="stat-card" style="text-align:left">
+            <div class="stat-label">STATUS</div>
+            <div class="stat-val" style="font-size:12px" id="armStatusLabel">—</div>
+          </div>
+        </div>
+
+        <details style="font-size:11px">
+          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► JOINTS · ±2°</summary>
+          <div id="armJointGrid" style="display:grid;grid-template-columns:1fr;gap:3px;margin-top:6px"></div>
+        </details>
+
+        <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
+      </div><!-- /tab-arm -->
+
+      <div class="tab-content" id="tab-rec" style="display:none">
+      <div class="deck-status">
+        <div class="stat-card" id="cardRecMode">
+          <div class="stat-label">REC_STATE</div>
+          <div class="stat-val" id="recPanelState" style="font-size:13px">IDLE</div>
+        </div>
+        <div class="stat-card" id="cardRecCnt">
+          <div class="stat-label">EVENTS · DUR</div>
+          <div class="stat-val" id="recPanelMeta" style="font-size:13px">0 · 0.0s</div>
+        </div>
+      </div>
+
+      <div class="rec-progress-row" id="recProgRow" style="display:none">
+        <div class="rec-progress-track"><div class="rec-progress-fill" id="recProgFill"></div></div>
+        <div class="rec-progress-meta" id="recProgMeta">— / —</div>
+      </div>
+      <div class="rec-current" id="recCurrent" style="display:none">▶ <span id="recCurrentText">—</span></div>
+
+      <div>
+        <div class="sec-label">RECORD · MEMORY · MAX 10MIN</div>
+        <div class="btn-row btn-2" style="margin-top:6px">
+          <button class="btn" id="btnRecToggle">● REC</button>
+          <button class="btn compact" id="btnRecClear" disabled>CLEAR</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">PLAYBACK</div>
+        <div class="btn-row btn-3" style="margin-top:6px">
+          <button class="btn" id="btnRecPlayFwd" disabled>▶ PLAY</button>
+          <button class="btn" id="btnRecPlayRev" disabled>◀ REVERSE</button>
+          <button class="btn compact" id="btnRecStopPlay" disabled>■ STOP</button>
+        </div>
+        <div class="slider-row" style="margin-top:8px">
+          <span class="slider-label">SPD</span>
+          <input type="range" id="recSpeed" min="0.25" max="4" step="0.25" value="1">
+          <span class="slider-val" id="recSpeedVal">1.00×</span>
+        </div>
+        <label class="cal-toggle">
+          <input type="checkbox" id="recCalibrate">
+          <span>CALIBRATE · ULTRA Δ VISUALIZATION</span>
+        </label>
+        <div class="slider-row" style="margin-top:6px" title="重心前置 → 后驱效率较低。降低此值倒车段拉长、distance API 自动补偿、minimap dead-reckoning 也用它">
+          <span class="slider-label">BACK_R</span>
+          <input type="range" id="backRatio" min="0.3" max="1.2" step="0.05" value="0.7">
+          <span class="slider-val" id="backRatioVal">0.70</span>
+        </div>
+      </div>
+
+      <div id="recCalDiff" class="rec-cal-diff" style="display:none">
+        <div class="sec-label">ULTRA · REC vs LIVE (mm)</div>
+        <div class="rec-cal-row"><span>S1·F</span><span id="recCalRec1">—</span><span id="recCalLive1">—</span><span id="recCalDiff1">—</span></div>
+        <div class="rec-cal-row"><span>S2·L</span><span id="recCalRec2">—</span><span id="recCalLive2">—</span><span id="recCalDiff2">—</span></div>
+        <div class="rec-cal-row"><span>S3·R</span><span id="recCalRec3">—</span><span id="recCalLive3">—</span><span id="recCalDiff3">—</span></div>
+      </div>
+      </div><!-- /tab-rec -->
     </div>
   </section>
 
@@ -1988,8 +2952,21 @@ svg.schem{width:100%;height:100%;display:block}
         </div>
       </div>
 
+      <div>
+        <div class="sec-label" style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+          <span>UPLOADS · MP3 / WAV / FLAC</span>
+          <label class="map-reset-btn" style="cursor:pointer;border-color:var(--amber-d);color:var(--amber);margin-left:0">
+            + UPLOAD<input type="file" id="uploadFile" accept=".mp3,.wav,.ogg,.flac,.m4a,.aac" style="display:none">
+          </label>
+        </div>
+        <div class="audio-list" id="uploadsList" style="max-height:130px"><div class="audio-empty">— EMPTY —</div></div>
+      </div>
+
       <div style="flex:1;display:flex;flex-direction:column;min-height:0">
-        <div class="sec-label">RECORDINGS · CLICK TO PLAY</div>
+        <div class="sec-label" style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+          <span>RECORDINGS · CLICK TO PLAY</span>
+          <button class="map-reset-btn" id="btnClearRecs" style="border-color:var(--red-d);color:var(--red);margin-left:0" title="delete all recordings">⌫ CLEAR</button>
+        </div>
         <div class="audio-list" id="recList"><div class="audio-empty">— EMPTY —</div></div>
       </div>
     </div>
@@ -2030,10 +3007,17 @@ svg.schem{width:100%;height:100%;display:block}
       else if (m.type === 'ultra'){ applyUltra(m.data); }
       else if (m.type === 'log'){ addLog(m.data); }
       else if (m.type === 'yolo'){
+        if (!yoloEnabled){
+          // YOLO 已关闭,任何残留 WS yolo event 都 ignore + 强制清空 SVG
+          const layer = document.getElementById('yoloBoxes');
+          if (layer && layer.innerHTML) layer.innerHTML = '';
+          return;
+        }
         renderYoloBoxes(m.data.detections);
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
       else if (m.type === 'map'){ applyMap(m.data); }
+      else if (m.type === 'rec'){ applyRec(m.data); }
       else if (m.type === 'volume'){
         const v = m.data || {};
         if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
@@ -2177,24 +3161,44 @@ svg.schem{width:100%;height:100%;display:block}
     // 反转 W↔S 让"按 W 画面里东西靠近"
     'w':'backward','arrowup':'backward',
     's':'forward','arrowdown':'forward',
-    // A/D 配合水平镜像后已经对了
-    'a':'left','arrowleft':'left',
-    'd':'right','arrowright':'right',
+    // 反转 A↔D:cam 朝后 + 画面 scaleX(-1) 镜像后,用户感知的"画面左滑"= 车体物理右移
+    'a':'right','arrowleft':'right',
+    'd':'left','arrowright':'left',
     // 反转 Q↔E 让旋转方向跟画面世界滚动方向一致
     'q':'rotate_cw','e':'rotate_ccw',
   };
   function moveMap(){ return rearMode ? moveMapRear : moveMapNormal; }
-  const HOLD_MS = 100;
-  const holdTimers = {};
+  // Hold 由后端 thread 控制,前端只发 down/renew/up 边沿(WS),避免网络抖动让 cmd 间隔不稳。
+  // 网络延迟只影响 down/up 边沿(瞬时),中间走的距离由后端本地稳定 100ms 计时决定。
+  const holdRenewers = {};
+  const HOLD_RENEW_MS = 600;  // < 后端 1.5s timeout,有冗余
+  function wsSend(obj){
+    if (ws && ws.readyState === 1){
+      try { ws.send(JSON.stringify(obj)); return true; } catch(e){}
+    }
+    return false;
+  }
   function startHold(action){
-    if (holdTimers[action]) return;
-    cmd(action);
-    holdTimers[action] = setInterval(() => cmd(action), HOLD_MS);
+    if (holdRenewers[action]) return;
+    if (!wsSend({type:'hold', state:'down', action})){
+      // WS 没连上时降级到 HTTP one-shot
+      cmd(action);
+      return;
+    }
+    holdRenewers[action] = setInterval(() => {
+      wsSend({type:'hold', state:'renew', action});
+    }, HOLD_RENEW_MS);
   }
   function stopHold(action){
-    if (!holdTimers[action]) return;
-    clearInterval(holdTimers[action]); delete holdTimers[action];
-    if (Object.keys(holdTimers).length === 0) cmd('stop');
+    if (!holdRenewers[action]) return;
+    clearInterval(holdRenewers[action]);
+    delete holdRenewers[action];
+    // 单键释放:剩余 hold action 仍由后端 round-robin 继续
+    wsSend({type:'hold', state:'up', action});
+    if (Object.keys(holdRenewers).length === 0){
+      // 全松开时兜底:HTTP stop 防 WS 抖动
+      try{ navigator.sendBeacon('/api/cmd/stop'); }catch(e){}
+    }
   }
 
   // ============ Keyboard ============
@@ -2270,7 +3274,7 @@ svg.schem{width:100%;height:100%;display:block}
   const rearActionMap = {
     forward: 'backward', backward: 'forward',
     rotate_ccw: 'rotate_cw', rotate_cw: 'rotate_ccw',
-    left: 'left', right: 'right',
+    left: 'right', right: 'left',
   };
   $$('.key[data-press]').forEach(el => {
     let currentHoldAction = null;
@@ -2307,23 +3311,12 @@ svg.schem{width:100%;height:100%;display:block}
     });
   });
 
-  // ============ Toggles (handle ESP32 mutual exclusion) ============
+  // ============ Toggles ============
+  // 后端 OBSTACLE 已改为"软件避障"(内部启 ULTRA_REPORT + 服务端检距停车),
+  // 跟 ULTRA_REPORT 不互斥了 — 前端不再需要先 off 再 on 的复合操作。
   let modeObs = false, modeUltra = false;
-  async function setObs(on){
-    if (on && modeUltra){
-      // ESP32 互斥:开避障必须先关超声波上报
-      cmd('ultra_off');
-      await new Promise(r => setTimeout(r, 150));
-    }
-    cmd(on ? 'obstacle_on' : 'obstacle_off');
-  }
-  async function setUltra(on){
-    if (on && modeObs){
-      cmd('obstacle_off');
-      await new Promise(r => setTimeout(r, 150));
-    }
-    cmd(on ? 'ultra_on' : 'ultra_off');
-  }
+  function setObs(on){ cmd(on ? 'obstacle_on' : 'obstacle_off'); }
+  function setUltra(on){ cmd(on ? 'ultra_on' : 'ultra_off'); }
   $('#btnObs').addEventListener('click', () => setObs(!modeObs));
   $('#btnUltra').addEventListener('click', () => setUltra(!modeUltra));
 
@@ -2384,6 +3377,58 @@ svg.schem{width:100%;height:100%;display:block}
   }
   loadRecs(); setInterval(loadRecs, 6000);
 
+  // ============ Uploaded music (mp3/wav/...) ============
+  async function loadUploads(){
+    try {
+      const r = await fetch('/api/audio/uploads'); const j = await r.json();
+      const box = $('#uploadsList');
+      if (!j.items || j.items.length===0){ box.innerHTML='<div class="audio-empty">— EMPTY —</div>'; return; }
+      box.innerHTML = '';
+      j.items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'audio-item';
+        const kb = (it.size/1024).toFixed(0);
+        row.innerHTML = `<span>▸ ${escapeHtml(it.name)}</span><span class="size">${kb}K  <span style="color:var(--red);margin-left:4px;cursor:pointer" data-del="${escapeHtml(it.name)}">✕</span></span>`;
+        row.querySelector('[data-del]').addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`Delete "${it.name}"?`)) return;
+          await fetch('/api/audio/upload/' + encodeURIComponent(it.name), {method:'DELETE'});
+          loadUploads();
+        });
+        row.addEventListener('click', () => audioApi('/api/audio/play', {name: it.name, src: 'uploads'}));
+        box.appendChild(row);
+      });
+    } catch(e){}
+  }
+  loadUploads(); setInterval(loadUploads, 8000);
+
+  $('#uploadFile').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const r = await fetch('/api/audio/upload', {method:'POST', body: fd});
+      if (r.ok) {
+        loadUploads();
+      } else {
+        const txt = await r.text();
+        alert('upload failed: ' + r.status + ' ' + txt);
+      }
+    } catch(err){ alert('upload error: ' + err.message); }
+  });
+
+  $('#btnClearRecs').addEventListener('click', async () => {
+    if (!confirm('Delete ALL recordings? This cannot be undone.')) return;
+    try {
+      const r = await fetch('/api/recordings', {method:'DELETE'});
+      const j = await r.json();
+      console.log('cleared', j.removed, 'recordings');
+      loadRecs();
+    } catch(e){}
+  });
+
   function formatAgo(d){
     const dt = (Date.now()-d.getTime())/1000;
     if (dt<60) return `${Math.floor(dt)}s`;
@@ -2421,6 +3466,11 @@ svg.schem{width:100%;height:100%;display:block}
     else if (s.last_action && s.last_action !== 'STOP') mode = s.last_action;
     $('#schMode').textContent = `MODE: ${mode}`;
     updateHudMode(em);
+    // ESP32 firmware deadlock banner
+    const banner = document.getElementById('deadlockBanner');
+    if (banner){
+      banner.style.display = s.esp32_deadlock ? 'block' : 'none';
+    }
     if (s.ultra) applyUltra(s.ultra);
   }
 
@@ -2492,6 +3542,29 @@ svg.schem{width:100%;height:100%;display:block}
       hits.innerHTML = parts.join('');
     }
 
+    // Recording trail overlay:回放时叠灰虚线(原录)+ 亮琥珀(回放实际)
+    const recTrail = document.getElementById('recordedTrail');
+    const repTrail = document.getElementById('replayTrail');
+    if (recTrail && repTrail){
+      if (recState.playing && recState.playback){
+        const drawPolyline = (pts, el) => {
+          let s = '';
+          pts.forEach(p => {
+            if (p && p.x != null){
+              const [sx, sy] = worldToSvg(p.x, p.y, pose);
+              s += `${sx.toFixed(1)},${sy.toFixed(1)} `;
+            }
+          });
+          el.setAttribute('points', s);
+        };
+        drawPolyline(recState.playback.trail_recorded || [], recTrail);
+        drawPolyline(recState.playback.trail_replay || [], repTrail);
+      } else {
+        recTrail.setAttribute('points', '');
+        repTrail.setAttribute('points', '');
+      }
+    }
+
     // Origin marker(起点 0,0)— 在视野内才显示
     const origin = document.getElementById('originMarker');
     if (origin){
@@ -2512,6 +3585,35 @@ svg.schem{width:100%;height:100%;display:block}
       if (r.ok) applyMap(await r.json());
     } catch(e){}
   });
+
+  // RTS RESET ESP32 按钮(deadlock banner 上的手动按钮)
+  const btnRtsReset = document.getElementById('btnTryRtsReset');
+  if (btnRtsReset){
+    btnRtsReset.addEventListener('click', async () => {
+      btnRtsReset.disabled = true;
+      btnRtsReset.textContent = '⟳ resetting...';
+      try {
+        const r = await fetch('/api/system/esp32_reset', {method: 'POST'});
+        const j = await r.json();
+        if (r.ok) {
+          btnRtsReset.textContent = '⟳ booting... wait 10s';
+          setTimeout(() => {
+            btnRtsReset.disabled = false;
+            btnRtsReset.textContent = '⟳ RTS RESET';
+          }, 12000);
+        } else {
+          btnRtsReset.textContent = '⟳ failed (' + j.detail + ')';
+          setTimeout(() => {
+            btnRtsReset.disabled = false;
+            btnRtsReset.textContent = '⟳ RTS RESET';
+          }, 5000);
+        }
+      } catch(e) {
+        btnRtsReset.disabled = false;
+        btnRtsReset.textContent = '⟳ RTS RESET';
+      }
+    });
+  }
 
   // RESTART 服务按钮
   $('#btnRestart').addEventListener('click', async () => {
@@ -2555,6 +3657,140 @@ svg.schem{width:100%;height:100%;display:block}
     }
     if (t) t.setAttribute('fill', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
   }
+
+  // ============ Recording ============
+  let recState = {recording:false, playing:false, event_count:0, duration_s:0, elapsed_s:0, playback:null};
+  function applyRec(d){
+    recState = d || recState;
+    const btnRec = $('#btnRecToggle');
+    const btnClear = $('#btnRecClear');
+    const btnPlay = $('#btnRecPlayFwd');
+    const btnRev = $('#btnRecPlayRev');
+    const btnStop = $('#btnRecStopPlay');
+    const stEl = $('#recPanelState');
+    const metaEl = $('#recPanelMeta');
+    const progRow = $('#recProgRow');
+    const progFill = $('#recProgFill');
+    const progMeta = $('#recProgMeta');
+    const curEl = $('#recCurrent');
+    const curTxt = $('#recCurrentText');
+    const calBox = $('#recCalDiff');
+
+    // 状态文字 + REC 按钮形态
+    if (d.recording){
+      stEl.textContent = `RECORDING · ${d.elapsed_s.toFixed(1)}s`;
+      stEl.style.color = '#ff3a2e';
+      btnRec.textContent = '■ STOP REC';
+      btnRec.classList.add('recording');
+    } else if (d.playing){
+      const pb = d.playback || {};
+      const dirTxt = pb.direction === 'reverse' ? '◀ REV' : '▶ FWD';
+      stEl.textContent = `PLAYBACK · ${dirTxt} ${pb.speed?.toFixed(2)}×`;
+      stEl.style.color = '#5af0ff';
+      btnRec.textContent = '● REC';
+      btnRec.classList.remove('recording');
+    } else {
+      stEl.textContent = d.event_count > 0 ? 'READY · IDLE' : 'IDLE';
+      stEl.style.color = '';
+      btnRec.textContent = '● REC';
+      btnRec.classList.remove('recording');
+    }
+    metaEl.textContent = `${d.event_count} · ${d.duration_s.toFixed(1)}s`;
+
+    // 按钮 disabled 状态
+    const idle = !d.recording && !d.playing;
+    const hasRec = d.event_count > 0;
+    btnRec.disabled = d.playing;
+    btnClear.disabled = !idle || !hasRec;
+    btnPlay.disabled = !idle || !hasRec;
+    btnRev.disabled = !idle || !hasRec;
+    btnStop.disabled = !d.playing;
+
+    // 回放进度条 + 当前指令
+    if (d.playing && d.playback){
+      const pb = d.playback;
+      const pct = pb.duration > 0 ? Math.min(100, 100 * pb.elapsed / pb.duration) : 0;
+      progRow.style.display = '';
+      progFill.style.width = pct.toFixed(1) + '%';
+      progMeta.textContent = `${pb.elapsed.toFixed(1)}/${pb.duration.toFixed(1)}s · ${pb.idx}/${pb.total}`;
+      if (pb.current){
+        curEl.style.display = '';
+        const kind = pb.current.kind || '';
+        const act = pb.current.action || '';
+        curTxt.textContent = `${kind.toUpperCase()} · ${act.toUpperCase()}`;
+      } else {
+        curEl.style.display = 'none';
+      }
+      // 校准对比
+      if (pb.calibrate && pb.ultra_recorded && pb.ultra_live){
+        calBox.style.display = '';
+        [1,2,3].forEach(id => {
+          const r = pb.ultra_recorded[id];
+          const l = pb.ultra_live[id];
+          const diff = (pb.ultra_diff_mm || {})[id];
+          $(`#recCalRec${id}`).textContent = r != null ? r : '—';
+          $(`#recCalLive${id}`).textContent = l != null ? l : '—';
+          const dEl = $(`#recCalDiff${id}`);
+          if (diff != null){
+            dEl.textContent = (diff >= 0 ? '+' : '') + diff;
+            dEl.style.color = Math.abs(diff) > 150 ? '#ff3a2e' : (Math.abs(diff) > 50 ? '#ffb000' : '#7fff5a');
+          } else { dEl.textContent = '—'; dEl.style.color = ''; }
+        });
+      } else {
+        calBox.style.display = 'none';
+      }
+    } else {
+      progRow.style.display = 'none';
+      curEl.style.display = 'none';
+      calBox.style.display = 'none';
+    }
+  }
+
+  // Rec button handlers
+  $('#btnRecToggle').addEventListener('click', async () => {
+    try {
+      if (recState.recording){ await fetch('/api/rec/stop', {method:'POST'}); }
+      else { await fetch('/api/rec/start', {method:'POST'}); }
+    } catch(e){}
+  });
+  $('#btnRecClear').addEventListener('click', async () => {
+    try { await fetch('/api/rec/clear', {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecPlayFwd').addEventListener('click', async () => {
+    const sp = $('#recSpeed').value; const cal = $('#recCalibrate').checked ? 1 : 0;
+    try { await fetch(`/api/rec/play?direction=forward&speed=${sp}&calibrate=${cal}`, {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecPlayRev').addEventListener('click', async () => {
+    const sp = $('#recSpeed').value; const cal = $('#recCalibrate').checked ? 1 : 0;
+    try { await fetch(`/api/rec/play?direction=reverse&speed=${sp}&calibrate=${cal}`, {method:'POST'}); } catch(e){}
+  });
+  $('#btnRecStopPlay').addEventListener('click', async () => {
+    try { await fetch('/api/rec/stop_playback', {method:'POST'}); } catch(e){}
+  });
+  $('#recSpeed').addEventListener('input', ev => {
+    $('#recSpeedVal').textContent = parseFloat(ev.target.value).toFixed(2) + '×';
+  });
+  // BACKWARD_RATIO 校准
+  $('#backRatio').addEventListener('input', ev => {
+    $('#backRatioVal').textContent = parseFloat(ev.target.value).toFixed(2);
+  });
+  $('#backRatio').addEventListener('change', async ev => {
+    const v = parseFloat(ev.target.value);
+    try {
+      await fetch('/api/map/config', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({backward_ratio: v})});
+    } catch(e){}
+  });
+  // 启动时拉一次 map config 同步初值
+  (async () => {
+    try {
+      const r = await fetch('/api/map/state'); const d = await r.json();
+      if (d && d.config && d.config.backward_ratio != null){
+        $('#backRatio').value = d.config.backward_ratio;
+        $('#backRatioVal').textContent = parseFloat(d.config.backward_ratio).toFixed(2);
+      }
+    } catch(e){}
+  })();
 
   function applyUltra(u){
     const MAX = 4000;
@@ -2644,7 +3880,13 @@ svg.schem{width:100%;height:100%;display:block}
     yoloBtn.classList.toggle('on', yoloEnabled);
     $('#yoloBadge').textContent = yoloEnabled ? 'ON' : 'OFF';
     await yoloPost({enabled: yoloEnabled});
-    if (!yoloEnabled){ renderYoloBoxes([]); $('#yoloStat').textContent = '— ms · 0'; }
+    if (!yoloEnabled){
+      renderYoloBoxes([]);
+      $('#yoloStat').textContent = '— ms · 0';
+      // 防止 await POST 期间残留 WS event 把 bbox 画回去 — 延迟再清一次
+      setTimeout(() => renderYoloBoxes([]), 300);
+      setTimeout(() => renderYoloBoxes([]), 1000);
+    }
   });
   yoloConfSlider.addEventListener('input', e => yoloConfVal.textContent = parseFloat(e.target.value).toFixed(2));
   yoloConfSlider.addEventListener('change', e => yoloPost({conf: parseFloat(e.target.value)}));
@@ -2729,6 +3971,112 @@ svg.schem{width:100%;height:100%;display:block}
       refreshFilterEcho([]);
     }
   }).catch(() => {});
+
+  // ============ ARM tab (机械臂) ============
+  $$('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+      $$('.tab-content').forEach(c => {
+        c.style.display = c.id === ('tab-' + btn.dataset.tab) ? '' : 'none';
+      });
+    });
+  });
+
+  const ARM_STEP_M = 0.01;
+  $$('[data-arm-nudge]').forEach(el => {
+    el.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      const dir = el.dataset.armNudge;
+      const body = {dx: 0, dy: 0, dz: 0};
+      if (dir === 'x+') body.dx = ARM_STEP_M;
+      else if (dir === 'x-') body.dx = -ARM_STEP_M;
+      else if (dir === 'y+') body.dy = ARM_STEP_M;
+      else if (dir === 'y-') body.dy = -ARM_STEP_M;
+      else if (dir === 'z+') body.dz = ARM_STEP_M;
+      else if (dir === 'z-') body.dz = -ARM_STEP_M;
+      el.classList.add('active');
+      try {
+        await fetch('/api/arm/nudge_cartesian', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body),
+        });
+      } catch(e){}
+      setTimeout(() => el.classList.remove('active'), 200);
+    });
+  });
+
+  $$('[data-arm-act]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const a = el.dataset.armAct;
+      let url, body;
+      if (a === 'home') { url = '/api/arm/home'; body = {}; }
+      else if (a === 'gripper-open')  { url = '/api/arm/gripper'; body = {delta_deg:  5}; }
+      else if (a === 'gripper-close') { url = '/api/arm/gripper'; body = {delta_deg: -5}; }
+      if (!url) return;
+      try {
+        await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify(body)});
+      } catch(e){}
+    });
+  });
+
+  async function loadArmStatus(){
+    try {
+      const r = await fetch('/api/arm/status');
+      const s = await r.json();
+      const label = $('#armStatusLabel');
+      if (!s.available){
+        if (label) label.textContent = 'NOT INSTALLED';
+        return;
+      }
+      if (!s.connected){
+        if (label) label.textContent = (s.reason || s.error || 'disconnected').toUpperCase().slice(0, 20);
+        return;
+      }
+      if (label) label.textContent = 'CONNECTED';
+      if (s.cartesian_position_m){
+        const p = s.cartesian_position_m;
+        $('#armX').textContent = (p.x * 1000).toFixed(0);
+        $('#armY').textContent = (p.y * 1000).toFixed(0);
+        $('#armZ').textContent = (p.z * 1000).toFixed(0);
+      }
+      if (s.present_positions_deg){
+        const grid = $('#armJointGrid');
+        if (grid && !grid.dataset.built){
+          grid.dataset.built = '1';
+          let html = '';
+          for (const name of Object.keys(s.present_positions_deg)){
+            const shortName = name.replace('joint_','J').toUpperCase().replace('GRIPPER','GRIP');
+            html += `<div style="display:grid;grid-template-columns:46px 1fr 26px 26px;gap:4px;align-items:center;font-size:10px;font-family:var(--font-mono)">
+              <span style="color:var(--text-dim);letter-spacing:.1em">${shortName}</span>
+              <span class="arm-joint-val" data-joint="${name}" style="color:var(--amber);text-align:right;font-family:var(--font-tech)">—</span>
+              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="-2">−</button>
+              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="2">+</button>
+            </div>`;
+          }
+          grid.innerHTML = html;
+          grid.querySelectorAll('[data-joint-nudge]').forEach(b => {
+            b.addEventListener('click', async () => {
+              try {
+                await fetch('/api/arm/nudge_joint', {
+                  method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({joint: b.dataset.jointNudge, delta_deg: parseFloat(b.dataset.delta)}),
+                });
+              } catch(e){}
+            });
+          });
+        }
+        // 更新 joint values
+        if (grid){
+          for (const [name, deg] of Object.entries(s.present_positions_deg)){
+            const el = grid.querySelector(`[data-joint="${name}"]`);
+            if (el) el.textContent = deg.toFixed(1) + '°';
+          }
+        }
+      }
+    } catch(e){}
+  }
+  loadArmStatus(); setInterval(loadArmStatus, 3000);
 
   // ============ Log ============
   const MAX_LOG = 300;

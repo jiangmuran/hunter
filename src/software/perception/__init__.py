@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import numpy as np
-from ultralytics import YOLO
+from typing import Any
 
 CAT_CLASS = 15  # COCO class index for "cat"
 
@@ -14,10 +13,12 @@ class CatDetector:
     """
 
     def __init__(self, model_path: str = "yolo11n.pt", conf: float = 0.4):
+        from ultralytics import YOLO
+
         self.model = YOLO(model_path)
         self.conf = conf
 
-    def detect(self, frame: np.ndarray) -> list[dict]:
+    def detect(self, frame: Any) -> list[dict]:
         """
         frame: BGR numpy 数组（来自 cv2 / HunterAPI.snapshot()）
 

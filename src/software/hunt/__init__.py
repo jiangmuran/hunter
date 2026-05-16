@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import time
-
 from software.api_client import HunterAPI
 from software.perception import CatDetector
 
@@ -39,7 +38,9 @@ class CatChaser:
         chaser.stop()
     """
 
-    def __init__(self, api: HunterAPI, detector: CatDetector | None = None):
+    def __init__(self, api: "HunterAPI", detector: "CatDetector" | None = None):
+        from src.perception import CatDetector
+
         self.api = api
         self.detector = detector or CatDetector()
         self._stop_event = threading.Event()

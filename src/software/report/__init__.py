@@ -327,7 +327,7 @@ _DRINK_GOOD = "今天喝水{n}次，泌尿系统状况良好，继续保持。"
 _DRINK_ZERO = "今天好像没怎么喝水，主人要记得检查一下水碗。"
 
 _MEME_LINE = "被拍了{n}张表情包，本喵有点在意，但表面若无其事。"
-_MEME_CAPTION = "其中最萌那张，Hunter标注了"{c}"——本喵觉得这个评价还算准确。"
+_MEME_CAPTION = "其中最萌那张，Hunter标注了{c}——本喵觉得这个评价还算准确。"
 
 _PLAY_LINES = [
     "玩了{n}轮，其中{w}轮本喵给了面子配合了一下。",
@@ -467,7 +467,7 @@ class DailyDiary:
             f"  最喜欢的玩法：{arm_cn}\n"
             f"  饮水次数：{stats['drink_events']}\n"
             f"  表情包：{stats['memes_made']} 张"
-            + (f"，最高分字幕："{stats['top_meme_caption']}"" if stats["top_meme_caption"] else "")
+            + (f"，最高分字幕：{stats['top_meme_caption']}" if stats["top_meme_caption"] else "")
             + "\n"
         )
 
