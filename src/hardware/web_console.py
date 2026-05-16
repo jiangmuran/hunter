@@ -71,6 +71,7 @@ car: CarController | None = None
 audio: AudioController | None = None
 camera: "CameraStreamer | None" = None
 yolo: "YOLOInferencer | None" = None
+minimap: "MiniMap | None" = None
 loop: asyncio.AbstractEventLoop | None = None
 
 YOLO_MODELS_DIR = "/home/pi/yolo_env"
@@ -198,6 +199,161 @@ class CameraStreamer:
             return 0.0
         span = w[-1] - w[0]
         return (len(w) - 1) / span if span > 0 else 0.0
+
+
+# ====================== MiniMap / dead-reckoning + occupancy ======================
+import math as _math
+
+class MiniMap:
+    """Pure software dead-reckoning + occupancy grid. Memory only, reset on service restart.
+
+    输入:
+      - cmd(action) 通过 install_event_hooks 自动触发 → 维持 self.current_action
+      - BUTTONSPEED 回应 → 更新速度估计
+      - ULTRA 数据 → 投影到世界坐标,累积到 occupancy grid
+
+    位置坐标系 (right-handed,+x 起始朝向,+y 起始左侧,theta 逆时针):
+      - 服务启动那一刻 = 原点 + theta=0
+      - 服务重启清空所有状态
+    """
+
+    # 速度模型常数(初始猜测,可通过 /api/map/config 实时标定)
+    K_LINEAR = 0.05    # mm/s per BUTTONSPEED. BS=2000 → 100mm/s
+    K_ANGULAR = 0.0006 # rad/s per BUTTONSPEED. BS=2000 → 1.2 rad/s ≈ 69°/s
+    # 传感器朝向(车体局部,弧度,基于 schematic S2 左前 / S1 前 / S3 右前)
+    SENSOR_YAW = {1: 0.0, 2: _math.radians(50), 3: _math.radians(-50)}
+    SENSOR_OFFSET_X_MM = 50
+    GRID_CELL_MM = 100        # 10cm
+    MAX_HIT_RANGE_MM = 3500   # 超过此距离的 ULTRA 当噪声
+
+    def __init__(self):
+        self.x_mm = 0.0
+        self.y_mm = 0.0
+        self.theta = 0.0
+        self.current_action: str | None = None
+        self.button_speed = 2000
+        self.last_step_t = time.time()
+        self.lock = threading.Lock()
+        self.grid: dict[tuple[int, int], int] = {}
+        self.recent_hits: deque = deque(maxlen=80)
+        self.pose_history: deque = deque(maxlen=300)
+        self.running = False
+        self.thread = None
+
+    def set_action(self, action: str | None):
+        with self.lock:
+            self.current_action = action
+
+    def set_button_speed(self, bs: int):
+        with self.lock:
+            try: self.button_speed = max(500, int(bs))
+            except Exception: pass
+
+    def reset(self):
+        with self.lock:
+            self.x_mm = 0.0; self.y_mm = 0.0; self.theta = 0.0
+            self.grid.clear()
+            self.recent_hits.clear()
+            self.pose_history.clear()
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def _loop(self):
+        DT = 0.05  # 50ms step
+        counter = 0
+        while self.running:
+            time.sleep(DT)
+            with self.lock:
+                self._step(DT)
+            counter += 1
+            # 每 ~500ms 采一次轨迹点(仅当位置变化时)
+            if counter % 10 == 0:
+                with self.lock:
+                    last = self.pose_history[-1] if self.pose_history else None
+                    if last is None or _math.hypot(self.x_mm - last["x"], self.y_mm - last["y"]) > 20:
+                        self.pose_history.append({
+                            "x": round(self.x_mm, 1),
+                            "y": round(self.y_mm, 1),
+                            "t": int(time.time() * 1000),
+                        })
+
+    def _step(self, dt: float):
+        a = self.current_action
+        # 只有方向类 cmd 持续作用;其他都是脉冲(stop/cat/speed)
+        if a not in ("FORWARD", "BACKWARD", "LEFT", "RIGHT", "ROT_CW", "ROT_CCW"):
+            return
+        v = self.K_LINEAR * self.button_speed
+        w = self.K_ANGULAR * self.button_speed
+        vx_local = vy_local = dw = 0.0
+        if a == "FORWARD":    vx_local = v
+        elif a == "BACKWARD": vx_local = -v
+        elif a == "LEFT":     vy_local = v
+        elif a == "RIGHT":    vy_local = -v
+        elif a == "ROT_CCW":  dw = w
+        elif a == "ROT_CW":   dw = -w
+        c, s = _math.cos(self.theta), _math.sin(self.theta)
+        self.x_mm += (vx_local * c - vy_local * s) * dt
+        self.y_mm += (vx_local * s + vy_local * c) * dt
+        self.theta += dw * dt
+        # normalize to [-pi, pi]
+        while self.theta > _math.pi:  self.theta -= 2 * _math.pi
+        while self.theta < -_math.pi: self.theta += 2 * _math.pi
+
+    def on_ultra(self, sensor_id: int, distance_mm: int, has_obstacle: bool):
+        if not has_obstacle: return
+        if distance_mm < 30 or distance_mm > self.MAX_HIT_RANGE_MM: return
+        with self.lock:
+            sensor_yaw_local = self.SENSOR_YAW.get(sensor_id, 0.0)
+            # 传感器世界朝向
+            beam_theta = self.theta + sensor_yaw_local
+            # 传感器世界位置(车前方 50mm 处)
+            sx = self.x_mm + self.SENSOR_OFFSET_X_MM * _math.cos(self.theta)
+            sy = self.y_mm + self.SENSOR_OFFSET_X_MM * _math.sin(self.theta)
+            # 障碍点 = sensor + distance 沿 beam 方向
+            hx = sx + distance_mm * _math.cos(beam_theta)
+            hy = sy + distance_mm * _math.sin(beam_theta)
+            cx = int(hx // self.GRID_CELL_MM)
+            cy = int(hy // self.GRID_CELL_MM)
+            self.grid[(cx, cy)] = self.grid.get((cx, cy), 0) + 1
+            self.recent_hits.append({"t": int(time.time() * 1000),
+                                     "x": round(hx, 1), "y": round(hy, 1),
+                                     "sensor": sensor_id})
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "pose": {
+                    "x": round(self.x_mm, 1),
+                    "y": round(self.y_mm, 1),
+                    "theta": round(self.theta, 4),
+                    "theta_deg": round(_math.degrees(self.theta), 1),
+                },
+                "current_action": self.current_action,
+                "button_speed": self.button_speed,
+                "cell_mm": self.GRID_CELL_MM,
+                "cells": [
+                    [cx * self.GRID_CELL_MM, cy * self.GRID_CELL_MM, n]
+                    for (cx, cy), n in self.grid.items()
+                ],
+                "cell_count": len(self.grid),
+                "recent_hits": list(self.recent_hits),
+                "pose_history": list(self.pose_history),
+                "config": {"k_linear": self.K_LINEAR, "k_angular": self.K_ANGULAR},
+            }
+
+    def configure(self, *, k_linear=None, k_angular=None):
+        with self.lock:
+            if k_linear is not None:
+                self.K_LINEAR = max(0.001, min(1.0, float(k_linear)))
+            if k_angular is not None:
+                self.K_ANGULAR = max(0.00001, min(0.01, float(k_angular)))
+        return self.snapshot()
 
 
 # ====================== YOLO inference ======================
@@ -446,6 +602,8 @@ def on_ultra(data: dict):
         "t": now_ms(),
     }
     bcast({"type": "ultra", "data": state["ultra"]})
+    if minimap is not None:
+        minimap.on_ultra(sid, data["distance_mm"], data["has_obstacle"])
 
 
 def on_ps3_l1():
@@ -480,7 +638,11 @@ def install_event_hooks():
             state["modes"]["obstacle"] = False
             state["modes"]["ultra_report"] = False
         elif line.startswith("BUTTON_SPEED,"):
-            try: state["speed"] = int(line.split(",", 1)[1])
+            try:
+                bs = int(line.split(",", 1)[1])
+                state["speed"] = bs
+                if minimap is not None:
+                    minimap.set_button_speed(bs)
             except Exception: pass
 
         if not line.startswith("ULTRA,"):
@@ -511,6 +673,12 @@ def install_event_hooks():
             state["modes"]["emergency"] = False
         push_log(f"tx: {action}", "cmd")
         bcast({"type": "state", "data": state})
+        if minimap is not None:
+            # 只把方向类 action 设为 current,STOP / 急停立即清零,其他保持
+            if action in ("FORWARD","BACKWARD","LEFT","RIGHT","ROT_CW","ROT_CCW"):
+                minimap.set_action(action)
+            elif action in ("STOP", "EMERGENCY_STOP"):
+                minimap.set_action(None)
         orig_send(c)
 
     car.send = wrapped_send
@@ -520,7 +688,7 @@ def install_event_hooks():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global car, audio, camera, yolo, loop
+    global car, audio, camera, yolo, minimap, loop
     loop = asyncio.get_running_loop()
 
     push_log("boot: initializing CarController", "sys")
@@ -578,10 +746,26 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
+    push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
+    minimap = MiniMap()
+    minimap.start()
+    push_log("boot: minimap ready (memory only, resets on restart)", "sys")
+
+    # WS push minimap state every 200ms while there are clients
+    async def _minimap_pusher():
+        last = 0
+        while True:
+            await asyncio.sleep(0.2)
+            if not clients or minimap is None: continue
+            try: await _broadcast({"type": "map", "data": minimap.snapshot()})
+            except Exception: pass
+    _mm_task = asyncio.create_task(_minimap_pusher())
+
     push_log("system online", "sys")
     yield
     push_log("system shutdown", "sys")
-    for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo")]:
+    _mm_task.cancel()
+    for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         try: obj.close() if hasattr(obj, "close") else obj.stop()
         except Exception: pass
@@ -743,6 +927,12 @@ async def health():
                 if yolo else
                 {"ok": False, "detail": ("ultralytics missing" if not _yolo_ok else "init failed")}
             ),
+            "minimap": (
+                {"ok": minimap.running,
+                 "detail": (f"pose=({minimap.x_mm:.0f},{minimap.y_mm:.0f}) θ={_math.degrees(minimap.theta):.0f}° · "
+                            f"{len(minimap.grid)} cells · {len(minimap.pose_history)} trail")}
+                if minimap else {"ok": False, "detail": "not initialized"}
+            ),
         },
         "system": {
             "cpu_temp_c": cpu_temp,
@@ -801,6 +991,32 @@ async def cmd(action: str):
         push_log(f"cmd error: {action}: {e}", "sys")
         raise HTTPException(500, str(e))
     return {"ok": True, "action": action}
+
+
+@app.get("/api/map/state", tags=["map"], summary="MiniMap pose + 占用栅格快照",
+         description="dead-reckoning 估算的 pose (x,y mm + theta rad) + 累积的 occupancy cells")
+async def map_state():
+    if minimap is None:
+        raise HTTPException(503, "minimap not initialized")
+    return minimap.snapshot()
+
+
+@app.post("/api/map/reset", tags=["map"], summary="清空地图 + pose 归零")
+async def map_reset():
+    if minimap is None:
+        raise HTTPException(503, "minimap not initialized")
+    minimap.reset()
+    push_log("minimap reset", "sys")
+    return {"ok": True}
+
+
+@app.post("/api/map/config", tags=["map"], summary="标定速度模型常数",
+          description="body: `{k_linear: 0.05, k_angular: 0.0006}`  —  mm/s 和 rad/s 每单位 BUTTONSPEED")
+async def map_config(req: Request):
+    if minimap is None:
+        raise HTTPException(503, "minimap not initialized")
+    body = await req.json()
+    return minimap.configure(**{k: body[k] for k in ("k_linear","k_angular") if k in body})
 
 
 @app.get("/api/yolo/status", tags=["yolo"], summary="YOLO 状态 + 配置 + 最新检测",
@@ -1054,6 +1270,10 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 }
 .panel-head::before{content:"▸";margin-right:8px}
 .panel-head .ph-r{margin-left:auto;color:var(--text-dim);font-size:9px;letter-spacing:.2em}
+.map-reset-btn{margin-left:10px;background:transparent;border:1px solid var(--line2);
+  color:var(--text-dim);font-family:var(--font-mono);font-size:9px;letter-spacing:.15em;
+  padding:2px 8px;cursor:pointer;text-transform:uppercase;height:18px}
+.map-reset-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.06)}
 .panel-body{padding:12px;flex:1;overflow:hidden;position:relative;display:flex;flex-direction:column;gap:10px}
 
 header{grid-area:head;background:linear-gradient(90deg,#1a1410,#15110b 50%,#1a1410);
@@ -1272,11 +1492,11 @@ svg.schem{width:100%;height:100%;display:block}
         <svg class="cam-hud" id="camHud" viewBox="0 0 400 300" preserveAspectRatio="none">
           <g id="hudMode" class="hud-badge">
             <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#ffb000" stroke-width="1"/>
-            <text x="72" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
+            <text x="72" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
           </g>
           <g id="hudAlert" opacity="0">
             <rect x="262" y="6" width="132" height="20" fill="rgba(255,58,46,0.88)" stroke="#ff3a2e" stroke-width="1"/>
-            <text x="328" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="11" fill="#0b0907" letter-spacing="2" font-weight="700">! OBSTACLE !</text>
+            <text x="328" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#0b0907" letter-spacing="2" font-weight="700">! OBSTACLE !</text>
           </g>
           <g id="yoloBoxes"></g>
         </svg>
@@ -1316,11 +1536,13 @@ svg.schem{width:100%;height:100%;display:block}
   </section>
 
   <section class="panel pane-tele">
-    <div class="panel-head">TELEMETRY · TOP-DOWN <span class="ph-r" id="schMode">MODE: IDLE</span></div>
+    <div class="panel-head">TELEMETRY · MINI-MAP <span class="ph-r" id="schMode">MODE: IDLE</span>
+      <button class="map-reset-btn" id="btnMapReset" title="reset map + pose">RESET</button>
+    </div>
     <div class="panel-body">
       <div class="schem-wrap">
-        <div class="schem-l">SCHEMATIC_v1.0</div>
-        <div class="schem-r">GRID: 200mm</div>
+        <div class="schem-l">DEAD-RECKON · OCC-GRID</div>
+        <div class="schem-r" id="schemPose">X:0 Y:0 θ:0°</div>
         <svg class="schem" id="schem" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet">
           <defs>
             <radialGradient id="sonarG" cx="50%" cy="100%" r="100%">
@@ -1334,11 +1556,24 @@ svg.schem{width:100%;height:100%;display:block}
           </defs>
           <line x1="200" y1="30" x2="200" y2="290" stroke="#5a4d2f" stroke-dasharray="2 4" opacity=".5"/>
           <line x1="60" y1="200" x2="340" y2="200" stroke="#5a4d2f" stroke-dasharray="2 4" opacity=".5"/>
-          <circle cx="200" cy="200" r="60" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
-          <circle cx="200" cy="200" r="100" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
-          <circle cx="200" cy="200" r="140" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
-          <text x="262" y="203" fill="#5a4d2f" font-size="8" font-family="Share Tech Mono">2000</text>
-          <text x="302" y="203" fill="#5a4d2f" font-size="8" font-family="Share Tech Mono">4000</text>
+          <!-- 距离环:按 MAP_SCALE=0.04 px/mm 对齐 -->
+          <circle cx="200" cy="200" r="40"  fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <circle cx="200" cy="200" r="80"  fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <circle cx="200" cy="200" r="120" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <text x="242" y="203" fill="#5a4d2f" font-size="7" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">1m</text>
+          <text x="282" y="203" fill="#5a4d2f" font-size="7" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">2m</text>
+          <text x="322" y="203" fill="#5a4d2f" font-size="7" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">3m</text>
+
+          <!-- Mini-map world layers (动态由 JS 渲染,ego-centric: 车在 (200,200) 朝上) -->
+          <polyline id="worldTrail" fill="none" stroke="#5af0ff" stroke-width="1.2" stroke-opacity="0.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <g id="worldOcc"></g>
+          <g id="worldHits"></g>
+          <g id="originMarker" style="display:none">
+            <circle cx="0" cy="0" r="5" fill="none" stroke="#7fff5a" stroke-width="1.2"/>
+            <line x1="-7" y1="0" x2="7" y2="0" stroke="#7fff5a" stroke-width="0.8" opacity="0.8"/>
+            <line x1="0" y1="-7" x2="0" y2="7" stroke="#7fff5a" stroke-width="0.8" opacity="0.8"/>
+            <text x="9" y="3" font-size="7" fill="#7fff5a" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" letter-spacing="0.5">ORIGIN</text>
+          </g>
 
           <g id="vehicle" transform="translate(200 200)">
             <g id="sonar2" opacity="0" transform="rotate(-50)"></g>
@@ -1357,7 +1592,7 @@ svg.schem{width:100%;height:100%;display:block}
 
             <polygon points="-10,-28 10,-28 0,-40" fill="#ffb000"/>
             <circle cx="0" cy="0" r="2.5" fill="#ffb000"/>
-            <text x="0" y="12" text-anchor="middle" font-size="9" fill="#5a4d2f" font-family="Major Mono Display">RPI-01</text>
+            <text x="0" y="12" text-anchor="middle" font-size="9" fill="#5a4d2f" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">RPI-01</text>
 
             <g><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
                <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S1</text></g>
@@ -1366,8 +1601,16 @@ svg.schem{width:100%;height:100%;display:block}
             <g transform="rotate(50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
                <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S3</text></g>
           </g>
-          <text x="200" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="10" fill="#5a4d2f" letter-spacing="3">FRONT</text>
-          <text x="200" y="312" text-anchor="middle" font-family="Major Mono Display" font-size="10" fill="#5a4d2f" letter-spacing="3">REAR</text>
+          <text x="200" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="10" fill="#5a4d2f" letter-spacing="3">FRONT</text>
+          <text x="200" y="312" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="10" fill="#5a4d2f" letter-spacing="3">REAR</text>
+
+          <!-- 比例尺:40px = 1m (MAP_SCALE 0.04 px/mm) -->
+          <g transform="translate(14 304)">
+            <line x1="0" y1="0" x2="40" y2="0" stroke="#5a4d2f" stroke-width="1"/>
+            <line x1="0" y1="-3" x2="0" y2="3" stroke="#5a4d2f" stroke-width="1"/>
+            <line x1="40" y1="-3" x2="40" y2="3" stroke="#5a4d2f" stroke-width="1"/>
+            <text x="20" y="-5" text-anchor="middle" font-size="7" fill="#5a4d2f" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">1m</text>
+          </g>
         </svg>
       </div>
 
@@ -1524,6 +1767,7 @@ svg.schem{width:100%;height:100%;display:block}
         renderYoloBoxes(m.data.detections);
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
+      else if (m.type === 'map'){ applyMap(m.data); }
     };
   }
   connect();
@@ -1809,6 +2053,98 @@ svg.schem{width:100%;height:100%;display:block}
     if (s.ultra) applyUltra(s.ultra);
   }
 
+  // ============ MiniMap (dead-reckoning + occupancy grid) ============
+  // ego-centric:车始终在 SVG 中心 (200, 200) 朝上,世界相对车反向滚动
+  const MAP_SCALE = 0.04;   // px / mm → 400px viewBox 覆盖 10m
+  const CAR_CX = 200, CAR_CY = 200;
+
+  function worldToSvg(wx, wy, pose){
+    // 数学坐标 (+x 前, +y 左, θ 逆时针) → ego-centric SVG (车在中心朝上)
+    // SVG +x 右、+y 下,所以:车前 → SVG -y, 车左 → SVG -x
+    const dx = wx - pose.x;
+    const dy = wy - pose.y;
+    const c = Math.cos(pose.theta);
+    const s = Math.sin(pose.theta);
+    const local_x = dx * c + dy * s;   // 前距
+    const local_y = -dx * s + dy * c;  // 左距
+    return [CAR_CX - local_y * MAP_SCALE, CAR_CY - local_x * MAP_SCALE];
+  }
+
+  function applyMap(data){
+    if (!data || !data.pose) return;
+    const pose = data.pose;
+    $('#schemPose').textContent = `X:${Math.round(pose.x)} Y:${Math.round(pose.y)} θ:${pose.theta_deg}°`;
+
+    // 轨迹
+    const trail = document.getElementById('worldTrail');
+    if (trail){
+      let pts = '';
+      (data.pose_history || []).forEach(p => {
+        const [sx, sy] = worldToSvg(p.x, p.y, pose);
+        pts += `${sx.toFixed(1)},${sy.toFixed(1)} `;
+      });
+      pts += `${CAR_CX},${CAR_CY}`;
+      trail.setAttribute('points', pts);
+    }
+
+    // Occupancy cells
+    const cell_mm = data.cell_mm || 100;
+    const cell_px = cell_mm * MAP_SCALE;
+    const occ = document.getElementById('worldOcc');
+    if (occ){
+      let maxN = 1;
+      (data.cells || []).forEach(c => { if (c[2] > maxN) maxN = c[2]; });
+      const parts = [];
+      (data.cells || []).forEach(c => {
+        const [wx, wy, n] = c;
+        const [sx, sy] = worldToSvg(wx + cell_mm/2, wy + cell_mm/2, pose);
+        if (sx < -20 || sx > 420 || sy < -20 || sy > 340) return;
+        const alpha = Math.min(0.92, 0.28 + (n / maxN) * 0.6);
+        parts.push(`<rect x="${(sx-cell_px/2).toFixed(1)}" y="${(sy-cell_px/2).toFixed(1)}" width="${cell_px.toFixed(1)}" height="${cell_px.toFixed(1)}" fill="#ff8a2e" opacity="${alpha.toFixed(2)}"/>`);
+      });
+      occ.innerHTML = parts.join('');
+    }
+
+    // Recent hits (闪烁红点,3 秒 fade)
+    const hits = document.getElementById('worldHits');
+    if (hits){
+      const now = Date.now();
+      const parts = [];
+      (data.recent_hits || []).forEach(h => {
+        const age = (now - h.t) / 1000;
+        if (age > 3) return;
+        const [sx, sy] = worldToSvg(h.x, h.y, pose);
+        if (sx < -10 || sx > 410 || sy < -10 || sy > 330) return;
+        const alpha = Math.max(0, 1 - age / 3);
+        parts.push(`<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="2.2" fill="#ff3a2e" opacity="${alpha.toFixed(2)}"/>`);
+      });
+      hits.innerHTML = parts.join('');
+    }
+
+    // Origin marker(起点 0,0)— 在视野内才显示
+    const origin = document.getElementById('originMarker');
+    if (origin){
+      const [ox, oy] = worldToSvg(0, 0, pose);
+      if (ox > 5 && ox < 395 && oy > 5 && oy < 315){
+        origin.style.display = '';
+        origin.setAttribute('transform', `translate(${ox.toFixed(1)} ${oy.toFixed(1)})`);
+      } else {
+        origin.style.display = 'none';
+      }
+    }
+  }
+
+  $('#btnMapReset').addEventListener('click', async () => {
+    try {
+      await fetch('/api/map/reset', {method: 'POST'});
+      const r = await fetch('/api/map/state');
+      if (r.ok) applyMap(await r.json());
+    } catch(e){}
+  });
+
+  // 页面初次加载就拉一次地图状态(不必等下次 200ms WS push)
+  fetch('/api/map/state').then(r => r.ok ? r.json() : null).then(d => { if (d) applyMap(d); }).catch(() => {});
+
   // ============ HUD overlay (mode badge + obstacle alert) ============
   function updateHudFromUltra(u){
     const anyDanger = [1,2,3].some(id => u[id] && u[id].has_obstacle);
@@ -1860,7 +2196,7 @@ svg.schem{width:100%;height:100%;display:block}
                 fill="${color}" stroke="${strokeColor}" stroke-width="0.5" opacity="0.7"/>
           <line x1="0" y1="-40" x2="0" y2="${-40-len-4}" stroke="${strokeColor}" stroke-width="0.5" opacity="0.8"/>
           <text x="0" y="${-44-len}" text-anchor="middle" font-size="11"
-                fill="${strokeColor}" font-family="Share Tech Mono" font-weight="700">${data.distance_mm}</text>
+                fill="${strokeColor}" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-weight="700">${data.distance_mm}</text>
         `;
       }
     });
