@@ -345,28 +345,30 @@ class YOLOInferencer:
                 "error": self.error,
             }
 
-    def configure(self, *, enabled=None, conf=None, iou=None, imgsz=None,
-                  classes=None, min_interval=None) -> dict:
-        if enabled is not None:
+    _UNSET = object()
+
+    def configure(self, *, enabled=_UNSET, conf=_UNSET, iou=_UNSET, imgsz=_UNSET,
+                  classes=_UNSET, min_interval=_UNSET) -> dict:
+        if enabled is not self._UNSET:
             self.enabled = bool(enabled)
             if not self.enabled:
                 with self.lock:
                     self.latest_detections = []
-        if conf is not None:
+        if conf is not self._UNSET and conf is not None:
             self.conf = max(0.01, min(0.99, float(conf)))
-        if iou is not None:
+        if iou is not self._UNSET and iou is not None:
             self.iou = max(0.0, min(1.0, float(iou)))
-        if imgsz is not None:
+        if imgsz is not self._UNSET and imgsz is not None:
             v = int(imgsz)
-            # ultralytics 要求 imgsz 是 32 的倍数
             v = max(160, min(1280, (v // 32) * 32))
             self.imgsz = v
-        if classes is not None:
-            if classes in (False, "all", []):
+        if classes is not self._UNSET:
+            # null / [] / "all" / False 都表示"全部类别(不过滤)"
+            if classes is None or classes in (False, "all", []):
                 self.classes = None
             else:
                 self.classes = [int(c) for c in classes]
-        if min_interval is not None:
+        if min_interval is not self._UNSET and min_interval is not None:
             self.min_interval = max(0.05, min(10.0, float(min_interval)))
         self._save_state()
         return self.get_state()
@@ -1292,6 +1294,7 @@ svg.schem{width:100%;height:100%;display:block}
           <div class="stat-card" style="text-align:left">
             <div class="stat-label">INFER · DETS</div>
             <div class="stat-val" style="font-size:14px" id="yoloStat">— ms · 0</div>
+            <div class="mod-detail" id="yoloFilterEcho" style="font-size:9px;color:var(--text-mute);margin-top:2px;font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">filter: all classes</div>
           </div>
         </div>
         <div class="slider-row"><span class="slider-label">CONF</span><input type="range" id="yoloConf" min="0.1" max="0.95" step="0.05" value="0.40"><span class="slider-val" id="yoloConfVal">0.40</span></div>
@@ -1920,16 +1923,42 @@ svg.schem{width:100%;height:100%;display:block}
 
   // 类别过滤
   const yoloFilterInput = $('#yoloFilter');
+  const yoloFilterEcho = $('#yoloFilterEcho');
   let yoloNameToId = {};   // {"person":0, ...}
   let yoloIdToName = {};
 
-  yoloFilterInput.addEventListener('change', () => {
+  function refreshFilterEcho(ids){
+    if (!ids || ids.length === 0){
+      yoloFilterEcho.textContent = 'filter: all classes';
+      yoloFilterEcho.style.color = 'var(--text-mute)';
+      return;
+    }
+    const names = ids.map(id => yoloIdToName[id] || ('#' + id));
+    yoloFilterEcho.textContent = 'filter: ' + names.join(', ');
+    yoloFilterEcho.style.color = 'var(--amber-l)';
+  }
+
+  function parseFilterIds(){
     const txt = yoloFilterInput.value.trim();
-    if (!txt){ yoloPost({classes: null}); return; }
-    const ids = txt.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    if (!txt) return [];
+    return txt.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
       .map(s => /^\d+$/.test(s) ? parseInt(s) : yoloNameToId[s])
       .filter(x => Number.isInteger(x));
+  }
+
+  let yoloFilterDebounce = null;
+  function applyFilter(){
+    const ids = parseFilterIds();
+    refreshFilterEcho(ids);
     yoloPost({classes: ids.length ? ids : null});
+  }
+  yoloFilterInput.addEventListener('input', () => {
+    clearTimeout(yoloFilterDebounce);
+    yoloFilterDebounce = setTimeout(applyFilter, 250);
+  });
+  yoloFilterInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(yoloFilterDebounce); applyFilter(); yoloFilterInput.blur(); }
+    if (e.key === 'Escape') { yoloFilterInput.value = ''; clearTimeout(yoloFilterDebounce); applyFilter(); }
   });
 
   // 拉一次状态同步初始 UI(服务可能已经 enabled = true 持久化的状态)
@@ -1963,6 +1992,9 @@ svg.schem{width:100%;height:100%;display:block}
     // 持久化的 classes 反显
     if (s.config && Array.isArray(s.config.classes) && s.config.classes.length){
       yoloFilterInput.value = s.config.classes.map(id => yoloIdToName[id] || id).join(',');
+      refreshFilterEcho(s.config.classes);
+    } else {
+      refreshFilterEcho([]);
     }
   }).catch(() => {});
 
