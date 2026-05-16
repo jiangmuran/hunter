@@ -4,7 +4,7 @@ import unittest
 class MotionGeneratorTest(unittest.TestCase):
     def test_right_side_target_rotates_clockwise(self):
         from src.app.state import AppState, RuntimeState
-        from src.hunt.motion_generator import MotionGenerator
+        from src.software.hunt.motion_generator import MotionGenerator
 
         decision = MotionGenerator().decide(
             AppState(current=RuntimeState.ALIGNING),
@@ -15,7 +15,7 @@ class MotionGeneratorTest(unittest.TestCase):
 
     def test_left_side_target_rotates_counter_clockwise(self):
         from src.app.state import AppState, RuntimeState
-        from src.hunt.motion_generator import MotionGenerator
+        from src.software.hunt.motion_generator import MotionGenerator
 
         decision = MotionGenerator().decide(
             AppState(current=RuntimeState.ALIGNING),
@@ -26,7 +26,7 @@ class MotionGeneratorTest(unittest.TestCase):
 
     def test_centered_far_target_moves_forward(self):
         from src.app.state import AppState, RuntimeState
-        from src.hunt.motion_generator import MotionGenerator
+        from src.software.hunt.motion_generator import MotionGenerator
 
         decision = MotionGenerator().decide(
             AppState(current=RuntimeState.APPROACHING),
@@ -37,7 +37,7 @@ class MotionGeneratorTest(unittest.TestCase):
 
     def test_near_target_stops(self):
         from src.app.state import AppState, RuntimeState
-        from src.hunt.motion_generator import MotionGenerator
+        from src.software.hunt.motion_generator import MotionGenerator
 
         decision = MotionGenerator().decide(
             AppState(current=RuntimeState.AT_STOP_DISTANCE),
@@ -48,7 +48,7 @@ class MotionGeneratorTest(unittest.TestCase):
 
     def test_error_and_lost_states_stop_safely(self):
         from src.app.state import AppState, RuntimeState
-        from src.hunt.motion_generator import MotionGenerator
+        from src.software.hunt.motion_generator import MotionGenerator
 
         generator = MotionGenerator()
         for runtime_state in [RuntimeState.ERROR, RuntimeState.EMERGENCY_STOP, RuntimeState.LOST_TARGET]:

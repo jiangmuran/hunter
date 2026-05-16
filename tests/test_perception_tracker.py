@@ -3,7 +3,7 @@ import unittest
 
 class CatTrackerTest(unittest.TestCase):
     def test_selects_largest_detection_without_prior_target(self):
-        from src.perception.tracker import CatTracker
+        from src.software.perception.tracker import CatTracker
 
         tracker = CatTracker(frame_size=(640, 480))
         target = tracker.update([
@@ -15,7 +15,7 @@ class CatTrackerTest(unittest.TestCase):
         self.assertEqual(target["missing_count"], 0)
 
     def test_retains_nearby_prior_target_over_larger_distant_detection(self):
-        from src.perception.tracker import CatTracker
+        from src.software.perception.tracker import CatTracker
 
         tracker = CatTracker(frame_size=(640, 480), retention_distance=80)
         tracker.update([
@@ -29,7 +29,7 @@ class CatTrackerTest(unittest.TestCase):
         self.assertEqual(target["cx"], 145)
 
     def test_empty_detections_increments_missing_count(self):
-        from src.perception.tracker import CatTracker
+        from src.software.perception.tracker import CatTracker
 
         tracker = CatTracker(frame_size=(640, 480))
         tracker.update([
@@ -41,7 +41,7 @@ class CatTrackerTest(unittest.TestCase):
         self.assertTrue(target["missing"])
 
     def test_target_includes_normalized_metrics(self):
-        from src.perception.tracker import CatTracker
+        from src.software.perception.tracker import CatTracker
 
         tracker = CatTracker(frame_size=(640, 480))
         target = tracker.update([

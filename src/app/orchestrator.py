@@ -7,7 +7,7 @@ from src.app.config import AppConfig
 from src.app.events import AppEvent, EventKind
 from src.app.state import AppState
 from src.app.state_machine import StateMachine
-from src.hunt.motion_generator import MotionGenerator
+from src.software.hunt.motion_generator import MotionGenerator
 
 
 class AppOrchestrator:
