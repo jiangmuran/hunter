@@ -40,6 +40,19 @@ except Exception:
     _yolo_ok = False
     YOLO = None
 
+# 机械臂(可选):https://github.com/zhanghy12/Minimal_interface_moce
+# 假设 clone 到 /home/pi/Minimal_interface_moce,pip install -e 后 physical_agent 可 import
+ARM_REPO_PATH = "/home/pi/Minimal_interface_moce"
+ARM_CONFIG_PATH = os.path.expanduser("~/Desktop/arm_config.json")
+try:
+    if os.path.isdir(os.path.join(ARM_REPO_PATH, "src")):
+        sys.path.insert(0, os.path.join(ARM_REPO_PATH, "src"))
+    from physical_agent.controller import Sts3215ArmController
+    _arm_ok = True
+except Exception:
+    _arm_ok = False
+    Sts3215ArmController = None
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 
@@ -55,6 +68,9 @@ audio: AudioController | None = None
 camera: "CameraStreamer | None" = None
 yolo: "YOLOInferencer | None" = None
 minimap: "MiniMap | None" = None
+holder: "HoldController" = None  # type: ignore
+arm: "Sts3215ArmController | None" = None
+arm_lock = threading.Lock()
 loop: asyncio.AbstractEventLoop | None = None
 
 YOLO_MODELS_DIR = "/home/pi/yolo_env"
@@ -379,6 +395,85 @@ class MiniMap:
         return self.snapshot()
 
 
+# ====================== HoldController (移动持续控制) ======================
+# 把"按住前进"逻辑从前端 setInterval 移到后端 thread,避免网络抖动让 cmd 间隔不稳。
+# 前端通过 WS 发 down/up 信号,后端持续每 100ms 给 ESP32 发指令。
+# 安全:1.5s 没 renew/up 自动 stop;WS 断开释放;急停时强制 release。
+
+class HoldController:
+    REPEAT_MS = 100
+    TIMEOUT_S = 1.5
+
+    def __init__(self):
+        self.current_action: str | None = None
+        self.last_renew_t = 0.0
+        self.thread: threading.Thread | None = None
+        self.lock = threading.Lock()
+        self._stop_event = threading.Event()
+
+    def hold(self, action: str):
+        with self.lock:
+            self.current_action = action
+            self.last_renew_t = time.time()
+            if self.thread is None or not self.thread.is_alive():
+                self._stop_event.clear()
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
+
+    def renew(self, action: str | None = None):
+        with self.lock:
+            if action is None or self.current_action == action:
+                self.last_renew_t = time.time()
+
+    def release(self, reason: str = "up"):
+        with self.lock:
+            had = self.current_action
+            self.current_action = None
+        if had is not None:
+            try:
+                if car is not None: car.stop()
+            except Exception: pass
+            push_log(f"hold release ({reason}): was {had}", "cmd")
+
+    def _loop(self):
+        action_fns = {
+            "forward":    "forward",
+            "backward":   "backward",
+            "left":       "left",
+            "right":      "right",
+            "rotate_cw":  "rotate_cw",
+            "rotate_ccw": "rotate_ccw",
+        }
+        # 绝对时间步进 — 让间隔精确到每次 REPEAT_MS,不受 car.method() 耗时影响
+        # 之前 time.sleep(0.1) 是相对 sleep,如果 method 耗时 20ms 实际 cycle 120ms,
+        # 多次循环下 ESP32 收到的 cmd 数量浮动 → 转弯/前进距离不一致
+        interval = self.REPEAT_MS / 1000.0
+        next_t = time.monotonic()
+        while True:
+            with self.lock:
+                action = self.current_action
+                age = time.time() - self.last_renew_t
+            if action is None:
+                break
+            if age > self.TIMEOUT_S:
+                self.release(reason=f"timeout {age:.1f}s")
+                break
+            try:
+                if car is not None:
+                    method_name = action_fns.get(action)
+                    if method_name:
+                        getattr(car, method_name)()
+            except Exception as e:
+                push_log(f"hold loop err: {e}", "sys")
+            next_t += interval
+            sleep_dur = next_t - time.monotonic()
+            if sleep_dur > 0:
+                time.sleep(sleep_dur)
+            else:
+                # cycle 严重落后(可能 GC / system load),重置以避免补偿性 burst
+                next_t = time.monotonic()
+
+
 # ====================== YOLO inference ======================
 
 class YOLOInferencer:
@@ -647,6 +742,19 @@ def on_ps3_l2():
     push_log("PS3_L2_DOWN -> arm_action_2", "ps3")
 
 
+# 音频播放前的电流稳定 helper(防止 USB Audio 启动瞬时电流 + 电机电流叠加触发 over-current)
+# 触发场景已知:用户按猫叫/上传播放 → USB DAC 启动有 200-400mA 冲 → 跟运行中电机叠加 → 4 个 USB root port 同时 over-current 保护 → 整个 USB 崩 + ESP32 firmware deadlock
+def _audio_preflight():
+    """音频播放前的电流预防:如果车正在动,先停车 + 等总电流稳定。"""
+    if car is None: return
+    if state["last_action"] in ("FORWARD","BACKWARD","LEFT","RIGHT","ROT_CW","ROT_CCW"):
+        try:
+            car.stop()
+            push_log("audio preflight: stopped motor to avoid USB over-current", "audio")
+            time.sleep(0.25)  # 让电流稳下来
+        except Exception: pass
+
+
 def install_event_hooks():
     orig_handle = car._handle_esp32_line
 
@@ -757,13 +865,21 @@ def install_event_hooks():
 
     car.send = wrapped_send
 
+    # 包装 car.play_wav (cat1-4 走的就是它),播放前先停车减少 USB 总电流
+    orig_play_wav = car.play_wav
+    def wrapped_play_wav(wav_path):
+        _audio_preflight()
+        return orig_play_wav(wav_path)
+    car.play_wav = wrapped_play_wav
+
 
 # ====================== Lifespan ======================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global car, audio, camera, yolo, minimap, loop
+    global car, audio, camera, yolo, minimap, holder, loop
     loop = asyncio.get_running_loop()
+    holder = HoldController()
 
     push_log("boot: initializing CarController", "sys")
     car = None
@@ -938,6 +1054,22 @@ async def lifespan(app: FastAPI):
     # 把 reset 函数暴露给手动 endpoint 用
     app.state.esp32_rts_pulse = _esp32_rts_pulse
 
+    # ---- 机械臂可选初始化 ----
+    global arm
+    if not _arm_ok:
+        push_log("boot: arm disabled (physical_agent not installed)", "sys")
+    elif not os.path.exists(ARM_CONFIG_PATH):
+        push_log(f"boot: arm disabled (config missing at {ARM_CONFIG_PATH})", "sys")
+    else:
+        try:
+            arm_ctrl = Sts3215ArmController.from_json(ARM_CONFIG_PATH)
+            arm_ctrl.connect()
+            arm = arm_ctrl
+            push_log("boot: arm ready", "sys")
+        except Exception as e:
+            push_log(f"boot: arm init failed: {e}", "sys")
+            arm = None
+
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
     minimap.start()
@@ -968,6 +1100,10 @@ async def lifespan(app: FastAPI):
             print(f"[shutdown] {name} close error: {e}")
 
     # car 优先 close,确保 ser.close() 在 SIGKILL 前完成
+    # arm.disconnect() 先做(servo disable_torque 需要时间)
+    if arm is not None:
+        try: arm.disconnect()
+        except Exception: pass
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         t = threading.Thread(target=_safe_close, args=(obj, name), daemon=True)
@@ -1014,7 +1150,103 @@ app = FastAPI(
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
-    return HTMLResponse(INDEX_HTML)
+    # no-store 让浏览器每次刷新都拉新 HTML,deploy 后无需用户 hard refresh
+    return HTMLResponse(INDEX_HTML, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    })
+
+
+@app.get("/api/arm/status", tags=["arm"], summary="机械臂状态(关节角度 / 末端 xyz)")
+async def arm_status():
+    if arm is None:
+        reason = "physical_agent missing" if not _arm_ok else \
+                 (f"config missing: {ARM_CONFIG_PATH}" if not os.path.exists(ARM_CONFIG_PATH) else "init failed")
+        return {"available": _arm_ok, "connected": False, "reason": reason}
+    def _read():
+        with arm_lock:
+            return arm.read_state()
+    try:
+        st = await asyncio.to_thread(_read)
+        return {"available": True, "connected": arm.is_connected, **st}
+    except Exception as e:
+        return {"available": True, "connected": False, "error": str(e)}
+
+
+@app.post("/api/arm/home", tags=["arm"], summary="所有关节回零")
+async def arm_home(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json() if int(req.headers.get("content-length", "0") or 0) > 0 else {}
+    speed = body.get("speed_deg_s")
+    def _do():
+        with arm_lock:
+            return arm.home(speed_deg_s=speed)
+    return await asyncio.to_thread(_do)
+
+
+@app.post("/api/arm/nudge_cartesian", tags=["arm"], summary="末端笛卡尔增量移动(米)",
+          description="body: `{dx: float (m), dy: float, dz: float, speed_deg_s?: float}`。例: `{\"dx\": 0.01}` 沿 +x 走 10mm")
+async def arm_nudge_cartesian(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    dx = float(body.get("dx", 0))
+    dy = float(body.get("dy", 0))
+    dz = float(body.get("dz", 0))
+    speed = body.get("speed_deg_s")
+    def _do():
+        with arm_lock:
+            return arm.nudge_cartesian(dx, dy, dz, speed_deg_s=speed)
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/move_cartesian", tags=["arm"], summary="末端笛卡尔绝对位置(米)",
+          description="body: `{x, y, z, speed_deg_s?}`")
+async def arm_move_cartesian(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.move_cartesian(
+                float(body["x"]), float(body["y"]), float(body["z"]),
+                speed_deg_s=body.get("speed_deg_s"),
+            )
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/nudge_joint", tags=["arm"], summary="单关节增量",
+          description="body: `{joint: 'joint_1', delta_deg: float, speed_deg_s?: float}`")
+async def arm_nudge_joint(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.nudge_joint(body["joint"], float(body["delta_deg"]), speed_deg_s=body.get("speed_deg_s"))
+    try:
+        goal = await asyncio.to_thread(_do)
+        return {"ok": True, "joint": body["joint"], "goal_raw": goal}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/gripper", tags=["arm"], summary="夹爪开/合(增量)",
+          description="body: `{delta_deg: float, speed_deg_s?: float}`。正值通常 open,负值 close。")
+async def arm_gripper(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.nudge_gripper(float(body.get("delta_deg", 5)), speed_deg_s=body.get("speed_deg_s"))
+    try:
+        goal = await asyncio.to_thread(_do)
+        return {"ok": True, "goal_raw": goal}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/system/esp32_reset", tags=["state"], summary="用 RTS 脉冲 cold-reset ESP32 (等价按板上 RST 按钮)",
@@ -1168,6 +1400,11 @@ async def health():
                             f"{len(minimap.grid)} cells · {len(minimap.pose_history)} trail")}
                 if minimap else {"ok": False, "detail": "not initialized"}
             ),
+            "arm": (
+                {"ok": arm.is_connected, "detail": f"{len(arm.online_joint_names)} joints online"}
+                if arm else
+                {"ok": False, "detail": ("physical_agent missing" if not _arm_ok else "not configured")}
+            ),
         },
         "system": {
             "cpu_temp_c": cpu_temp,
@@ -1209,14 +1446,61 @@ CMD_MAP = {
 @app.post("/api/cmd/{action}", tags=["control"], summary="发送单条车辆/避障/音效/速度指令",
           description=("**有效 action**:\n\n"
                        "- 运动: `forward` `backward` `left` `right` `rotate_cw` `rotate_ccw` `stop`\n"
-                       "- 避障: `obstacle_on` `obstacle_off` (与 ultra 互斥)\n"
+                       "- 避障: `obstacle_on` `obstacle_off`(软件避障,跟 ultra 兼容)\n"
                        "- 超声波上报: `ultra_on` `ultra_off`\n"
                        "- 急停: `emergency`\n"
                        "- 速度: `speed_up` `speed_down` `speed_reset`\n"
-                       "- 音效: `cat1` `cat2` `cat3` `cat4`\n"))
-async def cmd(action: str):
+                       "- 音效: `cat1` `cat2` `cat3` `cat4`\n\n"
+                       "**持续模式 query params**(优先级 angle > distance > duration):\n"
+                       "- `?duration=N` 持续 N 秒(最长 60)\n"
+                       "- `?distance=N` 行驶 N **mm**(仅 forward/backward/left/right,基于 minimap K_LINEAR + 当前 BUTTON_SPEED 换算)\n"
+                       "- `?angle=N` 转动 N **度**(仅 rotate_cw/rotate_ccw,基于 minimap K_ANGULAR)\n\n"
+                       "持续模式期间用后端 100ms 绝对时间步进给 ESP32 发 cmd,HTTP 阻塞直到完成。\n"
+                       "例:`curl -X POST 'http://pi:8000/api/cmd/forward?distance=500'` 直走 500mm 自停。\n"))
+async def cmd(action: str, duration: float = 0, distance: float = 0, angle: float = 0):
     if car is None:
         raise HTTPException(503, "car not ready")
+    HOLD_LINEAR = {"forward","backward","left","right"}
+    HOLD_ROTATE = {"rotate_cw","rotate_ccw"}
+    HOLD_ACTIONS = HOLD_LINEAR | HOLD_ROTATE
+
+    # 优先级:angle > distance > duration
+    d_s = 0.0
+    mode_detail = None
+    if angle > 0:
+        if action not in HOLD_ROTATE:
+            raise HTTPException(400, f"angle only valid for rotate_cw / rotate_ccw")
+        bs = state.get("speed") or 2000
+        k_a = (minimap.K_ANGULAR if minimap else 0.0006)
+        omega_deg_s = max(1.0, _math.degrees(k_a * bs))
+        d_s = float(angle) / omega_deg_s
+        mode_detail = f"angle={angle}° (est {omega_deg_s:.1f}°/s)"
+    elif distance > 0:
+        if action not in HOLD_LINEAR:
+            raise HTTPException(400, f"distance only valid for forward/backward/left/right")
+        bs = state.get("speed") or 2000
+        k_l = (minimap.K_LINEAR if minimap else 0.05)
+        v_mm_s = max(1.0, k_l * bs)
+        d_s = float(distance) / v_mm_s
+        mode_detail = f"distance={distance}mm (est {v_mm_s:.1f}mm/s)"
+    elif duration > 0:
+        if action not in HOLD_ACTIONS:
+            raise HTTPException(400, f"duration only valid for hold-able actions: {sorted(HOLD_ACTIONS)}")
+        d_s = float(duration)
+        mode_detail = f"duration={duration}s"
+
+    if d_s > 0:
+        if holder is None:
+            raise HTTPException(503, "holder not ready")
+        d_s = max(0.05, min(60.0, d_s))
+        holder.hold(action)
+        end = time.time() + d_s
+        while time.time() < end:
+            await asyncio.sleep(min(0.5, end - time.time()))
+            holder.renew(action)
+        holder.release(reason=f"{mode_detail} ended")
+        return {"ok": True, "action": action, "actual_duration_s": round(d_s, 3), "mode": "hold", "detail": mode_detail}
+
     fn = CMD_MAP.get(action)
     if not fn:
         raise HTTPException(404, f"unknown action: {action}")
@@ -1225,7 +1509,7 @@ async def cmd(action: str):
     except Exception as e:
         push_log(f"cmd error: {action}: {e}", "sys")
         raise HTTPException(500, str(e))
-    return {"ok": True, "action": action}
+    return {"ok": True, "action": action, "mode": "single"}
 
 
 @app.get("/api/map/state", tags=["map"], summary="MiniMap pose + 占用栅格快照",
@@ -1364,6 +1648,7 @@ async def audio_play(req: Request):
     if not os.path.exists(full):
         raise HTTPException(404, "not found")
     import subprocess as _sp
+    _audio_preflight()  # 减少 USB 总电流防过流
     try:
         # 用 ffmpeg 直接输出 ALSA,任何格式都通(wav/mp3/ogg/flac/m4a/aac),
         # 进程句柄记到 audio.play_process 让 stop_playback 能 kill 它
@@ -1602,8 +1887,19 @@ async def ws_endpoint(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 m = json.loads(msg)
-                if m.get("type") == "ping":
+                t = m.get("type")
+                if t == "ping":
                     await websocket.send_text(json.dumps({"type": "pong", "t": now_ms()}))
+                elif t == "hold" and holder is not None:
+                    # 后端管 hold thread,前端只发 down/renew/up 边沿
+                    st = m.get("state")
+                    act = m.get("action")
+                    if st == "down" and act:
+                        holder.hold(act)
+                    elif st == "renew":
+                        holder.renew(act)
+                    elif st == "up":
+                        holder.release()
             except Exception:
                 pass
     except WebSocketDisconnect:
@@ -1612,6 +1908,9 @@ async def ws_endpoint(websocket: WebSocket):
         pass
     finally:
         clients.discard(websocket)
+        # WS 断开 = 该客户端不再 hold,主动 release 防止 zombie
+        if holder is not None and len(clients) == 0:
+            holder.release(reason="last ws disconnect")
 
 
 # ====================== HTML ======================
@@ -1672,6 +1971,12 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 }
 .panel-head::before{content:"▸";margin-right:8px}
 .panel-head .ph-r{margin-left:auto;color:var(--text-dim);font-size:9px;letter-spacing:.2em}
+.tab-btn{margin-left:8px;background:transparent;border:none;color:var(--text-mute);
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;
+  padding:2px 6px;cursor:pointer;text-transform:uppercase;border-bottom:2px solid transparent}
+.tab-btn.active{color:var(--amber);border-bottom-color:var(--amber)}
+.tab-btn:hover:not(.active){color:var(--amber-l)}
+.tab-content{display:flex;flex-direction:column;flex:1;gap:12px;min-height:0}
 .map-reset-btn{margin-left:10px;background:transparent;border:1px solid var(--line2);
   color:var(--text-dim);font-family:var(--font-mono);font-size:9px;letter-spacing:.15em;
   padding:2px 8px;cursor:pointer;text-transform:uppercase;height:18px}
@@ -2065,8 +2370,14 @@ svg.schem{width:100%;height:100%;display:block}
   </section>
 
   <section class="panel pane-deck">
-    <div class="panel-head">INPUT DECK · MANUAL OVERRIDE <span class="ph-r" id="lastActChip">STOP</span></div>
+    <div class="panel-head">
+      INPUT DECK
+      <button class="tab-btn active" data-tab="drive">DRIVE</button>
+      <button class="tab-btn" data-tab="arm">ARM</button>
+      <span class="ph-r" id="lastActChip">STOP</span>
+    </div>
     <div class="panel-body">
+      <div class="tab-content" id="tab-drive">
       <div class="deck-status">
         <div class="stat-card" id="cardLast">
           <div class="stat-label">LAST_ACTION</div>
@@ -2110,6 +2421,50 @@ svg.schem{width:100%;height:100%;display:block}
       </div>
 
       <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
+      </div><!-- /tab-drive -->
+
+      <div class="tab-content" id="tab-arm" style="display:none">
+        <div class="deck-status" style="grid-template-columns:repeat(3,1fr)">
+          <div class="stat-card"><div class="stat-label">X mm</div><div class="stat-val" id="armX">--</div></div>
+          <div class="stat-card"><div class="stat-label">Y mm</div><div class="stat-val" id="armY">--</div></div>
+          <div class="stat-card"><div class="stat-label">Z mm</div><div class="stat-val" id="armZ">--</div></div>
+        </div>
+
+        <div>
+          <div class="sec-label">CARTESIAN · ±10mm</div>
+          <div class="key-grid" style="grid-template-columns:repeat(3,1fr);grid-template-rows:48px 48px">
+            <div class="key" data-arm-nudge="x+">+X<small>FRONT</small></div>
+            <div class="key" data-arm-nudge="z+">+Z<small>UP</small></div>
+            <div class="key" data-arm-nudge="y+">+Y<small>LEFT</small></div>
+            <div class="key" data-arm-nudge="x-">−X<small>BACK</small></div>
+            <div class="key" data-arm-nudge="z-">−Z<small>DOWN</small></div>
+            <div class="key" data-arm-nudge="y-">−Y<small>RIGHT</small></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="sec-label">GRIPPER · ±5°</div>
+          <div class="btn-row btn-2">
+            <button class="btn" data-arm-act="gripper-open"><span>◐ OPEN</span><span class="badge">+5°</span></button>
+            <button class="btn" data-arm-act="gripper-close"><span>◑ CLOSE</span><span class="badge">−5°</span></button>
+          </div>
+        </div>
+
+        <div class="btn-row btn-2">
+          <button class="btn" data-arm-act="home"><span>⌂ HOME</span><span class="badge">all zero</span></button>
+          <div class="stat-card" style="text-align:left">
+            <div class="stat-label">STATUS</div>
+            <div class="stat-val" style="font-size:12px" id="armStatusLabel">—</div>
+          </div>
+        </div>
+
+        <details style="font-size:11px">
+          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► JOINTS · ±2°</summary>
+          <div id="armJointGrid" style="display:grid;grid-template-columns:1fr;gap:3px;margin-top:6px"></div>
+        </details>
+
+        <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
+      </div><!-- /tab-arm -->
     </div>
   </section>
 
@@ -2373,17 +2728,34 @@ svg.schem{width:100%;height:100%;display:block}
     'q':'rotate_cw','e':'rotate_ccw',
   };
   function moveMap(){ return rearMode ? moveMapRear : moveMapNormal; }
-  const HOLD_MS = 100;
-  const holdTimers = {};
+  // Hold 由后端 thread 控制,前端只发 down/renew/up 边沿(WS),避免网络抖动让 cmd 间隔不稳。
+  // 网络延迟只影响 down/up 边沿(瞬时),中间走的距离由后端本地稳定 100ms 计时决定。
+  const holdRenewers = {};
+  const HOLD_RENEW_MS = 600;  // < 后端 1.5s timeout,有冗余
+  function wsSend(obj){
+    if (ws && ws.readyState === 1){
+      try { ws.send(JSON.stringify(obj)); return true; } catch(e){}
+    }
+    return false;
+  }
   function startHold(action){
-    if (holdTimers[action]) return;
-    cmd(action);
-    holdTimers[action] = setInterval(() => cmd(action), HOLD_MS);
+    if (holdRenewers[action]) return;
+    if (!wsSend({type:'hold', state:'down', action})){
+      // WS 没连上时降级到 HTTP one-shot
+      cmd(action);
+      return;
+    }
+    holdRenewers[action] = setInterval(() => {
+      wsSend({type:'hold', state:'renew', action});
+    }, HOLD_RENEW_MS);
   }
   function stopHold(action){
-    if (!holdTimers[action]) return;
-    clearInterval(holdTimers[action]); delete holdTimers[action];
-    if (Object.keys(holdTimers).length === 0) cmd('stop');
+    if (!holdRenewers[action]) return;
+    clearInterval(holdRenewers[action]);
+    delete holdRenewers[action];
+    if (Object.keys(holdRenewers).length === 0){
+      wsSend({type:'hold', state:'up'});
+    }
   }
 
   // ============ Keyboard ============
@@ -2999,6 +3371,113 @@ svg.schem{width:100%;height:100%;display:block}
       refreshFilterEcho([]);
     }
   }).catch(() => {});
+
+  // ============ ARM tab (机械臂) ============
+  $$('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+      $$('.tab-content').forEach(c => {
+        c.style.display = c.id === ('tab-' + btn.dataset.tab) ? '' : 'none';
+      });
+    });
+  });
+
+  const ARM_STEP_M = 0.01;
+  $$('[data-arm-nudge]').forEach(el => {
+    el.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      const dir = el.dataset.armNudge;
+      const body = {dx: 0, dy: 0, dz: 0};
+      if (dir === 'x+') body.dx = ARM_STEP_M;
+      else if (dir === 'x-') body.dx = -ARM_STEP_M;
+      else if (dir === 'y+') body.dy = ARM_STEP_M;
+      else if (dir === 'y-') body.dy = -ARM_STEP_M;
+      else if (dir === 'z+') body.dz = ARM_STEP_M;
+      else if (dir === 'z-') body.dz = -ARM_STEP_M;
+      el.classList.add('active');
+      try {
+        await fetch('/api/arm/nudge_cartesian', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body),
+        });
+      } catch(e){}
+      setTimeout(() => el.classList.remove('active'), 200);
+    });
+  });
+
+  $$('[data-arm-act]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const a = el.dataset.armAct;
+      let url, body;
+      if (a === 'home') { url = '/api/arm/home'; body = {}; }
+      else if (a === 'gripper-open')  { url = '/api/arm/gripper'; body = {delta_deg:  5}; }
+      else if (a === 'gripper-close') { url = '/api/arm/gripper'; body = {delta_deg: -5}; }
+      if (!url) return;
+      try {
+        await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify(body)});
+      } catch(e){}
+    });
+  });
+
+  async function loadArmStatus(){
+    try {
+      const r = await fetch('/api/arm/status');
+      const s = await r.json();
+      const label = $('#armStatusLabel');
+      if (!s.available){
+        if (label) label.textContent = 'NOT INSTALLED';
+        return;
+      }
+      if (!s.connected){
+        if (label) label.textContent = (s.reason || s.error || 'disconnected').toUpperCase().slice(0, 20);
+        return;
+      }
+      if (label) label.textContent = 'CONNECTED';
+      if (s.cartesian_position_m){
+        const p = s.cartesian_position_m;
+        $('#armX').textContent = (p.x * 1000).toFixed(0);
+        $('#armY').textContent = (p.y * 1000).toFixed(0);
+        $('#armZ').textContent = (p.z * 1000).toFixed(0);
+      }
+      if (s.present_positions_deg){
+        const grid = $('#armJointGrid');
+        if (grid && !grid.dataset.built){
+          grid.dataset.built = '1';
+          let html = '';
+          for (const name of Object.keys(s.present_positions_deg)){
+            const shortName = name.replace('joint_','J').toUpperCase().replace('GRIPPER','GRIP');
+            html += `<div style="display:grid;grid-template-columns:46px 1fr 26px 26px;gap:4px;align-items:center;font-size:10px;font-family:var(--font-mono)">
+              <span style="color:var(--text-dim);letter-spacing:.1em">${shortName}</span>
+              <span class="arm-joint-val" data-joint="${name}" style="color:var(--amber);text-align:right;font-family:var(--font-tech)">—</span>
+              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="-2">−</button>
+              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="2">+</button>
+            </div>`;
+          }
+          grid.innerHTML = html;
+          grid.querySelectorAll('[data-joint-nudge]').forEach(b => {
+            b.addEventListener('click', async () => {
+              try {
+                await fetch('/api/arm/nudge_joint', {
+                  method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({joint: b.dataset.jointNudge, delta_deg: parseFloat(b.dataset.delta)}),
+                });
+              } catch(e){}
+            });
+          });
+        }
+        // 更新 joint values
+        const grid = $('#armJointGrid');
+        if (grid){
+          for (const [name, deg] of Object.entries(s.present_positions_deg)){
+            const el = grid.querySelector(`[data-joint="${name}"]`);
+            if (el) el.textContent = deg.toFixed(1) + '°';
+          }
+        }
+      }
+    } catch(e){}
+  }
+  loadArmStatus(); setInterval(loadArmStatus, 3000);
 
   // ============ Log ============
   const MAX_LOG = 300;
