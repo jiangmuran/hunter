@@ -145,18 +145,27 @@ class CameraStreamer:
 
     def _loop(self):
         delay = 1.0 / max(1.0, self.target_fps)
+        fail_streak = 0
+        FAIL_THRESHOLD = 15      # 连续这么多帧失败就触发重连
+        RECONNECT_BACKOFF = 2.0   # 重连失败后等多久再试
         while self.running:
             t0 = time.time()
             try:
-                ok, frame = self.cap.read()
+                ok, frame = (self.cap.read() if self.cap is not None else (False, None))
             except Exception as e:
                 self.error = f"read: {e}"
-                time.sleep(0.3)
-                continue
+                ok, frame = False, None
             if not ok or frame is None:
-                self.error = "read returned None"
-                time.sleep(0.2)
+                fail_streak += 1
+                self.error = f"read failed (streak {fail_streak})"
+                if fail_streak >= FAIL_THRESHOLD:
+                    self._reopen()
+                    fail_streak = 0
+                    time.sleep(RECONNECT_BACKOFF)
+                else:
+                    time.sleep(0.2)
                 continue
+            fail_streak = 0
             self.error = None
             try:
                 ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
@@ -173,6 +182,33 @@ class CameraStreamer:
             dt = time.time() - t0
             if dt < delay:
                 time.sleep(delay - dt)
+
+    def _reopen(self):
+        """Release current handle and try to re-open the V4L2 device (e.g. after USB hot-unplug)."""
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+        try:
+            cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(self.device)
+            if not cap.isOpened():
+                self.error = "reopen: VideoCapture still closed"
+                return False
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap = cap
+            self.error = None
+            return True
+        except Exception as e:
+            self.error = f"reopen: {e}"
+            return False
 
     def stop(self):
         self.running = False
@@ -679,7 +715,18 @@ def install_event_hooks():
                 minimap.set_action(action)
             elif action in ("STOP", "EMERGENCY_STOP"):
                 minimap.set_action(None)
-        orig_send(c)
+        # 串口写带 1 次 retry(短瞬故障常见,长故障靠 serial watchdog)
+        last_err = None
+        for attempt in range(2):
+            try:
+                orig_send(c)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.05)
+        if last_err is not None:
+            push_log(f"send fail (2 attempts) {action}: {last_err}", "sys")
 
     car.send = wrapped_send
 
@@ -746,6 +793,44 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
+    # ---- 串口故障检测 + 自动重连(USB 热插拔 / ESP32 偶发掉线)----
+    async def _serial_watchdog():
+        consec_fail = 0
+        while True:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            if car is None:
+                continue
+            try:
+                if car.ser is None or not car.ser.is_open:
+                    raise IOError("ser not open")
+                # 探测:in_waiting / port 属性 — 设备真不在了会抛
+                _ = car.ser.in_waiting
+                _ = car.ser.port
+                consec_fail = 0
+                continue
+            except Exception as e:
+                consec_fail += 1
+                push_log(f"serial watchdog: fault #{consec_fail}: {e}", "sys")
+            # 重连
+            try: car.ser.close()
+            except Exception: pass
+            await asyncio.sleep(min(2 + consec_fail, 10))  # backoff
+            try:
+                new_ser = _pyserial.Serial(
+                    port=car.port,
+                    baudrate=car.baudrate,
+                    timeout=0.1,
+                )
+                car.ser = new_ser
+                push_log(f"serial: reconnected ok ({car.port})", "sys")
+                consec_fail = 0
+            except Exception as e2:
+                push_log(f"serial reconnect failed: {e2}", "sys")
+    _sw_task = asyncio.create_task(_serial_watchdog())
+
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
     minimap.start()
@@ -765,6 +850,7 @@ async def lifespan(app: FastAPI):
     yield
     push_log("system shutdown", "sys")
     _mm_task.cancel()
+    _sw_task.cancel()
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         try: obj.close() if hasattr(obj, "close") else obj.stop()
