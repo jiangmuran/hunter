@@ -1,0 +1,2014 @@
+#!/usr/bin/env python3
+"""
+ROBOT CONTROL UNIT // RPI-01
+Web console for the 3WD yahboom car — wraps car_driver + audio_driver + USB cam.
+
+Run:
+    python3 ~/Desktop/web_console.py
+    # listens on 0.0.0.0:8000
+"""
+
+import asyncio
+import json
+import os
+import sys
+import time
+import socket
+import threading
+from collections import deque
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.expanduser("~/Desktop"))
+
+# ====== Prevent ESP32 reset when opening serial (preserves BT remote pairing) ======
+# 默认 pyserial 打开串口会 assert DTR/RTS,在 ESP32+CH340 板上 = 触发 EN 复位
+# → 蓝牙手柄连接丢失。这里把 DTR/RTS 先置 False 再 open,ESP32 不重启。
+import serial as _pyserial
+_orig_serial_init = _pyserial.Serial.__init__
+def _patched_serial_init(self, *args, **kwargs):
+    port = kwargs.get("port", args[0] if args else None)
+    if port is None:
+        _orig_serial_init(self, *args, **kwargs)
+        return
+    kwargs2 = {**kwargs, "port": None}
+    if args and "port" not in kwargs:
+        args = args[1:]
+    _orig_serial_init(self, *args, **kwargs2)
+    self.port = port
+    try:
+        self.dtr = False
+        self.rts = False
+    except Exception:
+        pass
+    self.open()
+_pyserial.Serial.__init__ = _patched_serial_init
+
+from car_driver import CarController
+from audio_driver import AudioController
+
+import cv2
+import numpy as np
+
+# YOLO 是可选依赖,服务在 venv (有 ultralytics) 或系统 python (没有) 都能跑
+try:
+    from ultralytics import YOLO
+    _yolo_ok = True
+except Exception:
+    _yolo_ok = False
+    YOLO = None
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
+
+
+REC_DIR = "/home/pi/car_project/records"
+SOUND_DIR = "/home/pi/car_project/sounds"
+
+car: CarController | None = None
+audio: AudioController | None = None
+camera: "CameraStreamer | None" = None
+yolo: "YOLOInferencer | None" = None
+loop: asyncio.AbstractEventLoop | None = None
+
+YOLO_MODELS_DIR = "/home/pi/yolo_env"
+DEFAULT_YOLO_MODEL = "/home/pi/yolo_env/yolov8n.pt"
+clients: set[WebSocket] = set()
+log_buf: deque = deque(maxlen=300)
+
+state: dict = {
+    "ultra": {1: None, 2: None, 3: None},
+    "modes": {
+        "obstacle": False,
+        "ultra_report": False,
+        "emergency": False,
+    },
+    "speed": None,
+    "last_action": "STOP",
+    "recording": False,
+    "rec_path": None,
+}
+
+t_boot = time.time()
+t_last_esp32 = 0.0  # last time any ESP32 line was received
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+# ====================== Camera ======================
+
+class CameraStreamer:
+    """USB UVC camera -> MJPEG stream via shared latest_frame buffer."""
+
+    def __init__(self, device=0, width=640, height=480, fps=20, quality=72):
+        self.device = device
+        self.width = width
+        self.height = height
+        self.target_fps = fps
+        self.quality = quality
+        self.cap = None
+        self.latest_jpeg = None
+        self.last_frame_t = 0.0
+        self.frame_count = 0
+        self.running = False
+        self.thread = None
+        self.error: str | None = None
+        self.lock = threading.Lock()
+        self._fps_window = deque(maxlen=30)
+
+    def start(self) -> bool:
+        try:
+            self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(self.device)
+            if not self.cap.isOpened():
+                self.error = "cv2.VideoCapture failed"
+                self.cap = None
+                return False
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.running = True
+            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread.start()
+            return True
+        except Exception as e:
+            self.error = f"start: {e}"
+            return False
+
+    def _loop(self):
+        delay = 1.0 / max(1.0, self.target_fps)
+        while self.running:
+            t0 = time.time()
+            try:
+                ok, frame = self.cap.read()
+            except Exception as e:
+                self.error = f"read: {e}"
+                time.sleep(0.3)
+                continue
+            if not ok or frame is None:
+                self.error = "read returned None"
+                time.sleep(0.2)
+                continue
+            self.error = None
+            try:
+                ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+            except Exception as e:
+                self.error = f"encode: {e}"
+                time.sleep(0.2)
+                continue
+            if ok2:
+                with self.lock:
+                    self.latest_jpeg = bytes(buf)
+                    self.last_frame_t = time.time()
+                    self.frame_count += 1
+                    self._fps_window.append(self.last_frame_t)
+            dt = time.time() - t0
+            if dt < delay:
+                time.sleep(delay - dt)
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        if self.cap:
+            try: self.cap.release()
+            except Exception: pass
+        self.cap = None
+
+    def get_jpeg(self):
+        with self.lock:
+            return self.latest_jpeg, self.last_frame_t
+
+    def is_alive(self) -> bool:
+        if self.cap is None or not self.cap.isOpened():
+            return False
+        return (time.time() - self.last_frame_t) < 3.0
+
+    def fps(self) -> float:
+        with self.lock:
+            w = list(self._fps_window)
+        if len(w) < 2:
+            return 0.0
+        span = w[-1] - w[0]
+        return (len(w) - 1) / span if span > 0 else 0.0
+
+
+# ====================== YOLO inference ======================
+
+class YOLOInferencer:
+    """
+    后台 YOLO 推理:从 camera 拿最新 JPEG → decode → ultralytics 推理。
+    enabled=False 时空闲不耗 CPU。
+    检测结果归一化坐标 [0,1] 存到 latest_detections,前端 SVG 按视频区域比例画 bbox。
+    每次 configure() 后会持久化状态到 STATE_FILE,服务重启自动恢复。
+    """
+
+    STATE_FILE = "/home/pi/.config/robot-console/yolo_state.json"
+
+    def __init__(self, model_path: str, get_jpeg_fn, on_detection=None):
+        self.model_path = model_path
+        self.get_jpeg_fn = get_jpeg_fn
+        self.on_detection = on_detection
+        self.model = None
+        self.model_loaded = False
+        self.load_error: str | None = None
+
+        # 可调配置
+        self.enabled = False
+        self.conf = 0.40
+        self.iou = 0.50
+        self.imgsz = 416
+        self.classes: list[int] | None = None
+        self.min_interval = 0.5  # 推理之间最小间隔(s)
+
+        # 运行态
+        self.running = False
+        self.thread = None
+        self.latest_detections: list[dict] = []
+        self.latest_inference_t = 0.0
+        self.latest_inference_ms = 0
+        self.frame_shape: tuple[int, int] | None = None
+        self.lock = threading.Lock()
+        self.available_classes: dict[int, str] = {}
+        self.error: str | None = None
+
+    def load_model(self):
+        if not _yolo_ok:
+            self.load_error = "ultralytics not installed"
+            return False
+        try:
+            self.model = YOLO(self.model_path)
+            self.available_classes = dict(self.model.names)
+            self.model_loaded = True
+            self.load_error = None
+            return True
+        except Exception as e:
+            self.load_error = str(e)
+            return False
+
+    def start(self) -> bool:
+        if not _yolo_ok:
+            return False
+        if not self.model_loaded and not self.load_model():
+            return False
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self):
+        self.running = False
+
+    def _loop(self):
+        while self.running:
+            if not self.enabled or self.get_jpeg_fn is None:
+                time.sleep(0.25)
+                continue
+            jpeg, _ = self.get_jpeg_fn()
+            if jpeg is None:
+                time.sleep(0.1)
+                continue
+            try:
+                arr = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if arr is None:
+                    time.sleep(0.1); continue
+                t0 = time.time()
+                results = self.model(
+                    arr, conf=self.conf, iou=self.iou, imgsz=self.imgsz,
+                    classes=self.classes, verbose=False,
+                )
+                dt = (time.time() - t0) * 1000
+                h, w = arr.shape[:2]
+                dets = []
+                if results:
+                    r = results[0]
+                    for box in r.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        cls_i = int(box.cls[0])
+                        dets.append({
+                            "x": round(x1 / w, 4), "y": round(y1 / h, 4),
+                            "w": round((x2 - x1) / w, 4),
+                            "h": round((y2 - y1) / h, 4),
+                            "conf": round(float(box.conf[0]), 3),
+                            "cls": cls_i,
+                            "label": self.model.names.get(cls_i, str(cls_i)),
+                        })
+                with self.lock:
+                    self.latest_detections = dets
+                    self.latest_inference_t = time.time()
+                    self.latest_inference_ms = int(dt)
+                    self.frame_shape = (h, w)
+                    self.error = None
+                if self.on_detection:
+                    self.on_detection({
+                        "detections": dets,
+                        "inference_ms": int(dt),
+                        "t": int(self.latest_inference_t * 1000),
+                    })
+                # 节流:即使 inference 很快,也保证 min_interval
+                elapsed = (time.time() - t0)
+                if elapsed < self.min_interval:
+                    time.sleep(self.min_interval - elapsed)
+            except Exception as e:
+                self.error = str(e)
+                time.sleep(0.5)
+
+    def get_state(self) -> dict:
+        with self.lock:
+            return {
+                "available": _yolo_ok,
+                "loaded": self.model_loaded,
+                "enabled": self.enabled,
+                "model": self.model_path,
+                "model_classes": [
+                    {"id": k, "name": v} for k, v in sorted(self.available_classes.items())
+                ],
+                "config": {
+                    "conf": self.conf, "iou": self.iou, "imgsz": self.imgsz,
+                    "classes": list(self.classes) if self.classes is not None else None,
+                    "min_interval": self.min_interval,
+                },
+                "latest": {
+                    "detections": list(self.latest_detections),
+                    "inference_ms": self.latest_inference_ms,
+                    "frame_shape": self.frame_shape,
+                    "t_ms": int(self.latest_inference_t * 1000) if self.latest_inference_t else None,
+                },
+                "load_error": self.load_error,
+                "error": self.error,
+            }
+
+    def configure(self, *, enabled=None, conf=None, iou=None, imgsz=None,
+                  classes=None, min_interval=None) -> dict:
+        if enabled is not None:
+            self.enabled = bool(enabled)
+            if not self.enabled:
+                with self.lock:
+                    self.latest_detections = []
+        if conf is not None:
+            self.conf = max(0.01, min(0.99, float(conf)))
+        if iou is not None:
+            self.iou = max(0.0, min(1.0, float(iou)))
+        if imgsz is not None:
+            v = int(imgsz)
+            # ultralytics 要求 imgsz 是 32 的倍数
+            v = max(160, min(1280, (v // 32) * 32))
+            self.imgsz = v
+        if classes is not None:
+            if classes in (False, "all", []):
+                self.classes = None
+            else:
+                self.classes = [int(c) for c in classes]
+        if min_interval is not None:
+            self.min_interval = max(0.05, min(10.0, float(min_interval)))
+        self._save_state()
+        return self.get_state()
+
+    def _save_state(self):
+        try:
+            os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
+            with open(self.STATE_FILE, "w") as f:
+                json.dump({
+                    "enabled": self.enabled,
+                    "conf": self.conf,
+                    "iou": self.iou,
+                    "imgsz": self.imgsz,
+                    "min_interval": self.min_interval,
+                    "classes": list(self.classes) if self.classes is not None else None,
+                }, f, indent=2)
+        except Exception:
+            pass
+
+    def load_state(self) -> bool:
+        """Service 启动后调用,从持久化文件恢复 enabled/conf/imgsz 等。"""
+        try:
+            with open(self.STATE_FILE) as f:
+                st = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+        except Exception:
+            return False
+        if "enabled" in st: self.enabled = bool(st["enabled"])
+        if "conf" in st: self.conf = float(st["conf"])
+        if "iou" in st: self.iou = float(st["iou"])
+        if "imgsz" in st:
+            v = int(st["imgsz"])
+            self.imgsz = max(160, min(1280, (v // 32) * 32))
+        if "min_interval" in st: self.min_interval = float(st["min_interval"])
+        if "classes" in st:
+            self.classes = None if st["classes"] is None else [int(c) for c in st["classes"]]
+        return True
+
+
+# ====================== Pub/sub ======================
+
+async def _broadcast(payload: dict):
+    text = json.dumps(payload, ensure_ascii=False, default=str)
+    dead = []
+    for ws in list(clients):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+    for d in dead:
+        clients.discard(d)
+
+
+def bcast(payload: dict):
+    if loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(_broadcast(payload), loop)
+    except Exception:
+        pass
+
+
+def push_log(line: str, kind: str = "esp32"):
+    entry = {"t": now_ms(), "kind": kind, "line": line}
+    log_buf.append(entry)
+    bcast({"type": "log", "data": entry})
+
+
+def on_ultra(data: dict):
+    sid = data["sensor_id"]
+    state["ultra"][sid] = {
+        "distance_mm": data["distance_mm"],
+        "has_obstacle": data["has_obstacle"],
+        "t": now_ms(),
+    }
+    bcast({"type": "ultra", "data": state["ultra"]})
+
+
+def on_ps3_l1():
+    push_log("PS3_L1_DOWN -> arm_action_1", "ps3")
+
+
+def on_ps3_l2():
+    push_log("PS3_L2_DOWN -> arm_action_2", "ps3")
+
+
+def install_event_hooks():
+    orig_handle = car._handle_esp32_line
+
+    def wrapped_handle(line: str):
+        global t_last_esp32
+        t_last_esp32 = time.time()
+        if line == "OBSTACLE_ON":
+            state["modes"]["obstacle"] = True
+            state["modes"]["ultra_report"] = False  # ESP32 互斥
+        elif line == "OBSTACLE_OFF":
+            state["modes"]["obstacle"] = False
+        elif line == "ULTRA_REPORT_ON":
+            state["modes"]["ultra_report"] = True
+            state["modes"]["obstacle"] = False  # ESP32 自动关掉本地避障
+        elif line == "ULTRA_REPORT_OFF":
+            state["modes"]["ultra_report"] = False
+        elif line == "AUTO_OBSTACLE_BLOCKED_ULTRA_REPORT_ON":
+            # ESP32 拒绝开避障:超声波上报占用中
+            state["modes"]["obstacle"] = False
+        elif line == "EMERGENCY_STOP":
+            state["modes"]["emergency"] = True
+            state["modes"]["obstacle"] = False
+            state["modes"]["ultra_report"] = False
+        elif line.startswith("BUTTON_SPEED,"):
+            try: state["speed"] = int(line.split(",", 1)[1])
+            except Exception: pass
+
+        if not line.startswith("ULTRA,"):
+            push_log(line, "esp32")
+            bcast({"type": "state", "data": state})
+
+        orig_handle(line)
+
+    car._handle_esp32_line = wrapped_handle
+
+    orig_send = car.send
+    cmd_to_action = {
+        "x": "FORWARD", "w": "BACKWARD", "d": "LEFT", "a": "RIGHT",
+        "c": "ROT_CCW", "z": "ROT_CW", "s": "STOP",
+        "o": "OBSTACLE_ON", "p": "OBSTACLE_OFF",
+        "u": "ULTRA_REPORT_ON", "v": "ULTRA_REPORT_OFF",
+        "e": "EMERGENCY_STOP",
+        "+": "SPEED_UP", "-": "SPEED_DOWN", "m": "SPEED_RESET",
+        "1": "PLAY_CAT_1", "2": "PLAY_CAT_2", "3": "PLAY_CAT_3", "4": "PLAY_CAT_4",
+    }
+
+    def wrapped_send(c: str):
+        action = cmd_to_action.get(c, f"SEND({c})")
+        state["last_action"] = action
+        if action == "EMERGENCY_STOP":
+            state["modes"]["emergency"] = True
+        elif action != "STOP":
+            state["modes"]["emergency"] = False
+        push_log(f"tx: {action}", "cmd")
+        bcast({"type": "state", "data": state})
+        orig_send(c)
+
+    car.send = wrapped_send
+
+
+# ====================== Lifespan ======================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global car, audio, camera, yolo, loop
+    loop = asyncio.get_running_loop()
+
+    push_log("boot: initializing CarController", "sys")
+    try:
+        car = CarController(
+            ultrasonic_callback=on_ultra,
+            ps3_l1_callback=on_ps3_l1,
+            ps3_l2_callback=on_ps3_l2,
+        )
+        install_event_hooks()
+        push_log("boot: car ready", "sys")
+    except Exception as e:
+        push_log(f"boot: car FAILED: {e}", "sys")
+        car = None
+
+    push_log("boot: initializing AudioController", "sys")
+    try:
+        audio = AudioController()
+        push_log("boot: audio ready", "sys")
+    except Exception as e:
+        push_log(f"boot: audio FAILED: {e}", "sys")
+        audio = None
+
+    push_log("boot: initializing Camera", "sys")
+    try:
+        camera = CameraStreamer(device=0, width=640, height=480, fps=12, quality=65)
+        if camera.start():
+            push_log("boot: camera ready (640x480@20)", "sys")
+        else:
+            push_log(f"boot: camera FAILED: {camera.error}", "sys")
+            camera = None
+    except Exception as e:
+        push_log(f"boot: camera FAILED: {e}", "sys")
+        camera = None
+
+    push_log("boot: initializing YOLO", "sys")
+    if not _yolo_ok:
+        push_log("boot: YOLO disabled (ultralytics not installed in this python)", "sys")
+    else:
+        try:
+            yolo = YOLOInferencer(
+                model_path=DEFAULT_YOLO_MODEL,
+                get_jpeg_fn=(lambda: camera.get_jpeg()) if camera else (lambda: (None, 0)),
+                on_detection=lambda payload: bcast({"type": "yolo", "data": payload}),
+            )
+            if yolo.start():
+                if yolo.load_state():
+                    push_log(f"boot: YOLO ready, restored state ({'ON' if yolo.enabled else 'OFF'}, conf={yolo.conf}, imgsz={yolo.imgsz})", "sys")
+                else:
+                    push_log(f"boot: YOLO ready ({DEFAULT_YOLO_MODEL}, disabled by default)", "sys")
+            else:
+                push_log(f"boot: YOLO load failed: {yolo.load_error}", "sys")
+                yolo = None
+        except Exception as e:
+            push_log(f"boot: YOLO FAILED: {e}", "sys")
+            yolo = None
+
+    push_log("system online", "sys")
+    yield
+    push_log("system shutdown", "sys")
+    for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo")]:
+        if obj is None: continue
+        try: obj.close() if hasattr(obj, "close") else obj.stop()
+        except Exception: pass
+
+
+API_DESCRIPTION = """
+# 🤖 ROBOT CONTROL UNIT // RPI-01 — HTTP API
+
+封装 yahboom 3WD 全向轮机器人小车的所有数据与控制能力,供本机其他程序调用。
+
+## 端点分类
+- **`/api/cmd/{action}`** — 单条 POST 控制车辆/避障/音效/速度
+- **`/api/state`** — 拉取当前完整状态(模式 / 距离 / 速度 / 最后动作 / 录音 / 日志)
+- **`/api/health`** — 模块连通性 + 系统(CPU 温度 / 负载 / 内存 / 风扇 RPM&PWM)
+- **`/api/audio/*`** — 录音 / 播放 / 文件列表
+- **`/api/camera/*`** — MJPEG 流 / 单帧快照
+- **`/ws`** — WebSocket 实时推送 (ultra / state / log)
+
+## WebSocket 推送消息格式
+- `{"type":"snapshot","data":{"state":{...},"logs":[...]}}` — 首次连上的全量快照
+- `{"type":"ultra","data":{1:{distance_mm,has_obstacle,t},2:{...},3:{...}}}` — 超声波数据
+- `{"type":"state","data":{...}}` — 状态变化
+- `{"type":"log","data":{t,kind,line}}` — 单条日志(kind: esp32/cmd/audio/ps3/sys)
+
+## 完整 Markdown 文档:`/home/pi/Desktop/API.md`
+"""
+
+app = FastAPI(
+    title="Robot Control Unit",
+    version="1.0",
+    description=API_DESCRIPTION,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+
+
+# ====================== HTTP ======================
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def root():
+    return HTMLResponse(INDEX_HTML)
+
+
+@app.get("/api/state", tags=["state"], summary="拉取当前完整状态 + 最近 80 条日志",
+         description="返回 `state` 对象 (ultra / modes / speed / last_action / recording) 和最近的日志数组")
+async def get_state():
+    return {"state": state, "logs": list(log_buf)[-80:]}
+
+
+def _cpu_temp_c() -> float | None:
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except Exception:
+        return None
+
+
+def _fan_state() -> dict:
+    """读 /sys/class/hwmon 找 pwmfan 设备,返回 rpm/pwm/duty_pct/cur_state。"""
+    out = {"rpm": None, "pwm": None, "duty_pct": None, "cooling_state": None}
+    try:
+        for hwmon in os.listdir("/sys/class/hwmon"):
+            base = f"/sys/class/hwmon/{hwmon}"
+            try:
+                with open(f"{base}/name") as f:
+                    if f.read().strip() != "pwmfan":
+                        continue
+            except Exception:
+                continue
+            try:
+                with open(f"{base}/fan1_input") as f:
+                    out["rpm"] = int(f.read().strip())
+            except Exception: pass
+            try:
+                with open(f"{base}/pwm1") as f:
+                    p = int(f.read().strip())
+                    out["pwm"] = p
+                    out["duty_pct"] = round(100.0 * p / 255, 1)
+            except Exception: pass
+            break
+        try:
+            with open("/sys/class/thermal/cooling_device0/cur_state") as f:
+                cur = int(f.read().strip())
+            with open("/sys/class/thermal/cooling_device0/max_state") as f:
+                mx = int(f.read().strip())
+            out["cooling_state"] = f"{cur}/{mx}"
+        except Exception: pass
+    except Exception:
+        pass
+    return out
+
+
+def _esp32_last_age_ms() -> int | None:
+    if t_last_esp32 == 0.0:
+        return None
+    return int((time.time() - t_last_esp32) * 1000)
+
+
+@app.get("/api/health", tags=["state"], summary="模块连通性 + 系统监控",
+         description="serial/esp32/audio/camera/fan 每个模块 {ok, detail};system 含 cpu_temp_c, load_1m, mem_pct, fan_rpm, fan_pwm")
+async def health():
+    # serial
+    serial_ok = False
+    serial_detail = "—"
+    if car is not None:
+        try:
+            serial_ok = bool(car.ser and car.ser.is_open)
+            serial_detail = car.ser.port if car.ser else "—"
+        except Exception:
+            pass
+
+    # esp32 last seen
+    esp_age = _esp32_last_age_ms()
+    esp_ok = esp_age is not None and esp_age < 3000
+
+    # audio
+    audio_ok = audio is not None
+    audio_detail = audio.audio_device if audio else "—"
+
+    # camera
+    cam_ok = camera is not None and camera.is_alive()
+    cam_detail = f"/dev/video{camera.device} · {camera.width}x{camera.height}" if camera else "—"
+    cam_fps = round(camera.fps(), 1) if camera else 0.0
+    cam_age = None
+    if camera and camera.last_frame_t:
+        cam_age = int((time.time() - camera.last_frame_t) * 1000)
+
+    # system
+    cpu_temp = _cpu_temp_c()
+    try:    load1 = round(os.getloadavg()[0], 2)
+    except Exception: load1 = None
+    try:
+        with open("/proc/meminfo") as f:
+            meminfo = {}
+            for line in f:
+                k, v = line.split(":", 1)
+                meminfo[k.strip()] = v.strip()
+            mem_total = int(meminfo["MemTotal"].split()[0])
+            mem_avail = int(meminfo["MemAvailable"].split()[0])
+            mem_pct = round(100.0 * (1 - mem_avail / mem_total), 1)
+    except Exception:
+        mem_pct = None
+    up = int(time.time() - t_boot)
+    fan = _fan_state()
+
+    return {
+        "modules": {
+            "serial":  {"ok": serial_ok, "detail": serial_detail},
+            "esp32":   {"ok": esp_ok, "detail": (f"last {esp_age}ms ago" if esp_age is not None else "no data")},
+            "audio":   {"ok": audio_ok, "detail": audio_detail},
+            "camera":  {"ok": cam_ok, "detail": cam_detail, "fps": cam_fps, "frame_age_ms": cam_age},
+            "fan":     {"ok": fan["rpm"] is not None and fan["rpm"] > 0, "detail": (f"{fan['rpm']} rpm · {fan['duty_pct']}%" if fan["rpm"] is not None else "not present")},
+            "yolo":    (
+                {"ok": yolo.enabled and yolo.latest_inference_t > 0,
+                 "detail": (f"{yolo.latest_inference_ms} ms · {len(yolo.latest_detections)} det"
+                            if yolo.enabled else ("loaded · disabled" if yolo.model_loaded else "load error"))}
+                if yolo else
+                {"ok": False, "detail": ("ultralytics missing" if not _yolo_ok else "init failed")}
+            ),
+        },
+        "system": {
+            "cpu_temp_c": cpu_temp,
+            "load_1m": load1,
+            "mem_pct": mem_pct,
+            "uptime_s": up,
+            "clients": len(clients),
+            "fan_rpm": fan["rpm"],
+            "fan_pwm": fan["pwm"],
+            "fan_duty_pct": fan["duty_pct"],
+            "fan_cooling_state": fan["cooling_state"],
+        },
+    }
+
+
+CMD_MAP = {
+    "forward":      lambda: car.forward(),
+    "backward":     lambda: car.backward(),
+    "left":         lambda: car.left(),
+    "right":        lambda: car.right(),
+    "rotate_cw":    lambda: car.rotate_cw(),
+    "rotate_ccw":   lambda: car.rotate_ccw(),
+    "stop":         lambda: car.stop(),
+    "obstacle_on":  lambda: car.obstacle_on(),
+    "obstacle_off": lambda: car.obstacle_off(),
+    "ultra_on":     lambda: car.ultrasonic_report_on(),
+    "ultra_off":    lambda: car.ultrasonic_report_off(),
+    "emergency":    lambda: car.emergency_stop(),
+    "speed_up":     lambda: car.speed_up(),
+    "speed_down":   lambda: car.speed_down(),
+    "speed_reset":  lambda: car.speed_reset(),
+    "cat1":         lambda: car.play_cat_1(),
+    "cat2":         lambda: car.play_cat_2(),
+    "cat3":         lambda: car.play_cat_3(),
+    "cat4":         lambda: car.play_cat_4(),
+}
+
+
+@app.post("/api/cmd/{action}", tags=["control"], summary="发送单条车辆/避障/音效/速度指令",
+          description=("**有效 action**:\n\n"
+                       "- 运动: `forward` `backward` `left` `right` `rotate_cw` `rotate_ccw` `stop`\n"
+                       "- 避障: `obstacle_on` `obstacle_off` (与 ultra 互斥)\n"
+                       "- 超声波上报: `ultra_on` `ultra_off`\n"
+                       "- 急停: `emergency`\n"
+                       "- 速度: `speed_up` `speed_down` `speed_reset`\n"
+                       "- 音效: `cat1` `cat2` `cat3` `cat4`\n"))
+async def cmd(action: str):
+    if car is None:
+        raise HTTPException(503, "car not ready")
+    fn = CMD_MAP.get(action)
+    if not fn:
+        raise HTTPException(404, f"unknown action: {action}")
+    try:
+        fn()
+    except Exception as e:
+        push_log(f"cmd error: {action}: {e}", "sys")
+        raise HTTPException(500, str(e))
+    return {"ok": True, "action": action}
+
+
+@app.get("/api/yolo/status", tags=["yolo"], summary="YOLO 状态 + 配置 + 最新检测",
+         description="返回 enabled/loaded、当前配置、最近一次推理结果、类别列表。前端轮询或用 WS yolo 推送")
+async def yolo_status():
+    if yolo is None:
+        return {"available": _yolo_ok, "loaded": False, "enabled": False,
+                "load_error": "not initialized" if _yolo_ok else "ultralytics missing"}
+    return yolo.get_state()
+
+
+@app.post("/api/yolo/config", tags=["yolo"], summary="修改 YOLO 配置(enabled/conf/iou/imgsz/classes/min_interval)",
+          description=("body 任意字段(都可选):\n"
+                       "- `enabled` (bool): 开/关推理\n"
+                       "- `conf` (0-1): 置信度阈值\n"
+                       "- `iou` (0-1): NMS IoU 阈值\n"
+                       "- `imgsz` (int, 自动对齐 32 倍数): 推理输入尺寸\n"
+                       "- `classes` (list[int] | null): 类别 id 过滤 (null=全部)\n"
+                       "- `min_interval` (float): 推理之间最小间隔秒"))
+async def yolo_config(req: Request):
+    if yolo is None:
+        raise HTTPException(503, "yolo not initialized")
+    body = await req.json()
+    return yolo.configure(**{k: body[k] for k in
+                             ("enabled","conf","iou","imgsz","classes","min_interval") if k in body})
+
+
+@app.get("/api/yolo/models", tags=["yolo"], summary="列出可用 YOLO 模型(.pt / .onnx 文件)")
+async def yolo_models():
+    items = []
+    try:
+        for fn in os.listdir(YOLO_MODELS_DIR):
+            if fn.endswith((".pt", ".onnx")):
+                full = os.path.join(YOLO_MODELS_DIR, fn)
+                items.append({"name": fn, "path": full,
+                              "size": os.path.getsize(full)})
+    except Exception:
+        pass
+    return {"items": items, "current": (yolo.model_path if yolo else None)}
+
+
+@app.post("/api/audio/rec/start", tags=["audio"], summary="开始录音(写 wav 到 ~/car_project/records/web_<timestamp>.wav)")
+async def audio_rec_start():
+    if audio is None:
+        raise HTTPException(503, "audio not ready")
+    if state["recording"]:
+        return {"ok": False, "reason": "already recording", "path": state["rec_path"]}
+    fn = f"web_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+    path = os.path.join(REC_DIR, fn)
+    try:
+        audio.start_recording(save_path=path)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    state["recording"] = True
+    state["rec_path"] = path
+    push_log(f"rec start: {fn}", "audio")
+    bcast({"type": "state", "data": state})
+    return {"ok": True, "path": path}
+
+
+@app.post("/api/audio/rec/stop", tags=["audio"], summary="停止当前录音并落盘")
+async def audio_rec_stop():
+    if audio is None:
+        raise HTTPException(503, "audio not ready")
+    if not state["recording"]:
+        return {"ok": False, "reason": "not recording"}
+    try:
+        path = audio.stop_recording()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    state["recording"] = False
+    state["rec_path"] = None
+    push_log(f"rec save: {os.path.basename(path) if path else '?'}", "audio")
+    bcast({"type": "state", "data": state})
+    return {"ok": True, "path": path}
+
+
+@app.get("/api/recordings", tags=["audio"], summary="列出最近 30 条录音(按 mtime 降序)")
+async def list_recordings():
+    if not os.path.isdir(REC_DIR):
+        return {"items": []}
+    items = []
+    for fn in os.listdir(REC_DIR):
+        if not fn.endswith(".wav"): continue
+        full = os.path.join(REC_DIR, fn)
+        try: st = os.stat(full)
+        except OSError: continue
+        items.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"items": items[:30]}
+
+
+@app.post("/api/audio/play", tags=["audio"], summary="播放指定 wav",
+          description="body: `{name: \"xxx.wav\", src: \"recordings\"|\"sounds\"}`")
+async def audio_play(req: Request):
+    if audio is None:
+        raise HTTPException(503, "audio not ready")
+    body = await req.json()
+    name = body.get("name", "")
+    src = body.get("src", "recordings")
+    if "/" in name or ".." in name or not name:
+        raise HTTPException(400, "bad name")
+    base = REC_DIR if src == "recordings" else SOUND_DIR
+    full = os.path.join(base, name)
+    if not os.path.exists(full):
+        raise HTTPException(404, "not found")
+    try:
+        audio.play_wav(full)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    push_log(f"play: {src}/{name}", "audio")
+    return {"ok": True}
+
+
+@app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放")
+async def audio_stop():
+    if audio is None:
+        raise HTTPException(503, "audio not ready")
+    audio.stop_playback()
+    push_log("audio playback stopped", "audio")
+    return {"ok": True}
+
+
+# ====================== Camera stream ======================
+
+async def mjpeg_generator():
+    boundary = b"--frame\r\n"
+    last_t = 0.0
+    while True:
+        if camera is None:
+            await asyncio.sleep(0.5)
+            continue
+        jpeg, t = camera.get_jpeg()
+        if jpeg is None or t == last_t:
+            await asyncio.sleep(0.03)
+            continue
+        last_t = t
+        chunk = (boundary
+                 + b"Content-Type: image/jpeg\r\n"
+                 + f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                 + jpeg + b"\r\n")
+        yield chunk
+
+
+@app.get("/api/camera/stream.mjpg", tags=["camera"], summary="MJPEG 摄像头流",
+         description="multipart/x-mixed-replace 推送实时 JPEG 帧。浏览器 `<img src>` 直接显示;Python 用 `requests` 流式读取分段")
+async def camera_stream():
+    if camera is None:
+        raise HTTPException(503, "camera not ready")
+    return StreamingResponse(
+        mjpeg_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate",
+                 "Pragma": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/camera/snapshot.jpg", tags=["camera"], summary="当前帧 JPEG 快照(单张)")
+async def camera_snapshot():
+    if camera is None:
+        raise HTTPException(503, "camera not ready")
+    jpeg, _ = camera.get_jpeg()
+    if not jpeg:
+        raise HTTPException(503, "no frame yet")
+    return StreamingResponse(iter([jpeg]), media_type="image/jpeg")
+
+
+# ====================== WebSocket ======================
+
+@app.websocket("/ws")
+# WebSocket - 不出现在 OpenAPI,文档见 API.md 与 root description
+async def ws_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    clients.add(websocket)
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "snapshot",
+            "data": {"state": state, "logs": list(log_buf)[-80:]},
+        }, ensure_ascii=False, default=str))
+        while True:
+            msg = await websocket.receive_text()
+            try:
+                m = json.loads(msg)
+                if m.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong", "t": now_ms()}))
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        clients.discard(websocket)
+
+
+# ====================== HTML ======================
+
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ROBOT CONTROL UNIT // RPI-01</title>
+<link rel="preconnect" href="https://fonts.loli.net">
+<link rel="preconnect" href="https://gstatic.loli.net" crossorigin>
+<link href="https://fonts.loli.net/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* 全部统一用 JetBrains Mono(失败 fallback 到系统等宽) */
+  :root{
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    --font-display: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+    --font-tech: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+  }
+</style>
+<style>
+:root{
+  --bg:#0b0907; --bg2:#13100b; --panel:#1a1610; --panel2:#221c12;
+  --line:#312715; --line2:#5a4923;
+  --amber:#ffb000; --amber-d:#cf8a00; --amber-l:#ffd266;
+  --red:#ff3a2e; --red-d:#a8221a;
+  --green:#7fff5a; --cyan:#5af0ff;
+  --text:#ece2c4; --text-dim:#897a59; --text-mute:#4f4530;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font-family:var(--font-mono);user-select:none;-webkit-user-select:none;
+}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;
+  background:repeating-linear-gradient(0deg,rgba(255,176,0,.025) 0,rgba(255,176,0,.025) 1px,transparent 1px,transparent 3px),
+    radial-gradient(ellipse at 50% -20%,#1a140a 0%,#0b0907 70%);
+}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
+  background:radial-gradient(ellipse at center,transparent 40%,rgba(0,0,0,.55) 100%);
+  mix-blend-mode:multiply;
+}
+
+#app{position:relative;z-index:5;height:100vh;display:grid;
+  grid-template-rows:54px 1fr 220px;
+  grid-template-columns:1.4fr 1fr 1fr 320px;
+  grid-template-areas:
+    "head head head head"
+    "cam  tele deck side"
+    "log  log  log  side";
+  gap:1px;padding:8px;background:#1a1410;
+}
+
+.panel{background:var(--bg2);border:1px solid var(--line);position:relative;overflow:hidden;display:flex;flex-direction:column}
+.panel-head{flex:0 0 28px;display:flex;align-items:center;padding:0 12px;
+  background:linear-gradient(180deg,#1f1a12,#15110b);border-bottom:1px solid var(--line);
+  font-family:var(--font-display);font-size:10.5px;letter-spacing:.22em;color:var(--amber);text-transform:uppercase;
+}
+.panel-head::before{content:"▸";margin-right:8px}
+.panel-head .ph-r{margin-left:auto;color:var(--text-dim);font-size:9px;letter-spacing:.2em}
+.panel-body{padding:12px;flex:1;overflow:hidden;position:relative;display:flex;flex-direction:column;gap:10px}
+
+header{grid-area:head;background:linear-gradient(90deg,#1a1410,#15110b 50%,#1a1410);
+  border:1px solid var(--line);display:flex;align-items:center;padding:0 22px;position:relative;gap:14px;
+}
+header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--amber),transparent);opacity:.7;
+}
+.h-brand{font-family:var(--font-display);font-size:20px;letter-spacing:.32em;color:var(--amber);
+  text-transform:uppercase;text-shadow:0 0 12px rgba(255,176,0,.4)}
+.h-sub{font-size:10px;color:var(--text-dim);letter-spacing:.22em;text-transform:uppercase}
+.h-right{margin-left:auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.h-stat{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--text-dim);letter-spacing:.12em;text-transform:uppercase;cursor:default}
+.h-stat[title]{cursor:help}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--text-mute);box-shadow:0 0 6px rgba(255,176,0,.4);transition:background .2s,box-shadow .2s}
+.dot.ok{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+.dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.2s infinite}
+.dot.error{background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse .6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes flicker{0%,100%{opacity:1}50%{opacity:.55}}
+@keyframes scan{0%{transform:translateY(-100%)}100%{transform:translateY(100%)}}
+
+/* ============ CAM PANEL ============ */
+.pane-cam{grid-area:cam}
+.pane-cam .panel-body{gap:10px;padding:10px}
+
+.cam-frame{position:relative;width:100%;aspect-ratio:4/3;background:#000;border:1px solid var(--line2);overflow:hidden;flex:0 0 auto}
+.cam-frame::before{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,rgba(255,176,0,.04) 2px,rgba(255,176,0,.04) 3px);
+  pointer-events:none;z-index:2;
+}
+.cam-frame::after{content:"";position:absolute;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,176,0,.4),transparent);
+  animation:scan 3.5s linear infinite;pointer-events:none;z-index:3;
+}
+.cam-hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
+.cam-hud rect.hud-bar.hot{animation:flicker .35s infinite}
+.cam-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;display:block;z-index:1}
+.cam-corner{position:absolute;width:14px;height:14px;border:1.5px solid var(--amber);z-index:4;opacity:.85}
+.cam-corner.tl{top:4px;left:4px;border-right:none;border-bottom:none}
+.cam-corner.tr{top:4px;right:4px;border-left:none;border-bottom:none}
+.cam-corner.bl{bottom:4px;left:4px;border-right:none;border-top:none}
+.cam-corner.br{bottom:4px;right:4px;border-left:none;border-top:none}
+.cam-meta{position:absolute;left:6px;bottom:6px;font-family:var(--font-tech);font-size:10px;color:var(--amber);text-shadow:0 0 6px rgba(0,0,0,.8);z-index:4}
+.cam-rec{position:absolute;right:6px;top:6px;font-family:var(--font-tech);font-size:10px;color:var(--red);
+  display:flex;align-items:center;gap:6px;z-index:4;text-shadow:0 0 6px rgba(0,0,0,.8)}
+.cam-rec .recdot{width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse 1.2s infinite}
+.cam-overlay-err{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--red);
+  font-family:var(--font-display);font-size:13px;letter-spacing:.3em;z-index:5;background:rgba(0,0,0,.7);
+  text-shadow:0 0 8px var(--red)}
+
+.filter-row{display:grid;grid-template-columns:50px 1fr;gap:8px;align-items:center;margin-top:6px}
+.filter-row input[type="text"]{background:var(--panel);border:1px solid var(--line2);color:var(--text);
+  font-family:var(--font-mono);font-size:10px;padding:5px 7px;outline:none;letter-spacing:.05em}
+.filter-row input[type="text"]:focus{border-color:var(--amber);box-shadow:0 0 6px rgba(255,176,0,.25)}
+.filter-row input[type="text"]::placeholder{color:var(--text-mute)}
+.slider-row{display:grid;grid-template-columns:50px 1fr 48px;gap:8px;align-items:center;font-size:10px;margin-top:5px}
+.slider-label{color:var(--text-dim);letter-spacing:.18em;text-transform:uppercase}
+.slider-val{font-family:var(--font-tech);color:var(--amber);text-align:right;font-size:11px}
+input[type="range"]{accent-color:var(--amber);height:4px;cursor:pointer}
+
+.yolo-box-rect{fill:none;stroke-width:1.5}
+.yolo-box-label{font-family:var(--font-tech);font-size:10px;fill:#0b0907;font-weight:700;letter-spacing:0.5px}
+
+.sys-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:auto}
+.sys-card{border:1px solid var(--line);padding:6px 8px;background:var(--panel);text-align:center}
+.sys-card .sys-label{font-size:8px;color:var(--text-dim);letter-spacing:.15em;text-transform:uppercase}
+.sys-card .sys-val{font-family:var(--font-tech);font-size:14px;color:var(--amber);line-height:1.1;margin-top:2px}
+.sys-card.warn .sys-val{color:var(--red)}
+
+/* ============ TELE ============ */
+.pane-tele{grid-area:tele}
+.schem-wrap{position:relative;flex:1 1 0;min-height:150px;border:1px solid var(--line);
+  background:
+    repeating-linear-gradient(0deg,rgba(255,176,0,.04) 0,rgba(255,176,0,.04) 1px,transparent 1px,transparent 24px),
+    repeating-linear-gradient(90deg,rgba(255,176,0,.04) 0,rgba(255,176,0,.04) 1px,transparent 1px,transparent 24px),
+    #0e0b07;
+}
+.schem-l,.schem-r{position:absolute;top:6px;font-size:9px;letter-spacing:.2em;text-transform:uppercase}
+.schem-l{left:8px;color:var(--amber);opacity:.7}
+.schem-r{right:8px;color:var(--text-dim)}
+svg.schem{width:100%;height:100%;display:block}
+
+.ureadings{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex:0 0 auto}
+.ureading{border:1px solid var(--line);padding:9px 11px;background:var(--panel);position:relative}
+.ureading::before{content:"";position:absolute;left:-1px;top:-1px;width:8px;height:8px;border-top:1px solid var(--amber);border-left:1px solid var(--amber)}
+.ureading::after{content:"";position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-bottom:1px solid var(--amber);border-right:1px solid var(--amber)}
+.ureading-label{font-size:9px;color:var(--text-dim);letter-spacing:.2em;text-transform:uppercase}
+.ureading-row{display:flex;align-items:baseline;margin-top:2px}
+.ureading-val{font-family:var(--font-tech);font-size:24px;color:var(--amber);text-shadow:0 0 8px rgba(255,176,0,.4);line-height:1}
+.ureading-val.danger{color:var(--red);text-shadow:0 0 10px var(--red);animation:flicker .35s infinite}
+.ureading-unit{font-size:10px;color:var(--text-mute);margin-left:5px}
+.ureading-bar{margin-top:6px;height:3px;background:var(--bg);border:1px solid var(--line);position:relative}
+.ureading-bar > div{height:100%;background:var(--amber);transition:width .2s}
+.ureading.danger .ureading-bar > div{background:var(--red)}
+
+/* ============ DECK ============ */
+.pane-deck{grid-area:deck}
+.deck-status{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 auto}
+.stat-card{border:1px solid var(--line);padding:8px 10px;background:var(--panel);position:relative}
+.stat-card .stat-label{font-size:9px;color:var(--text-dim);letter-spacing:.2em;text-transform:uppercase}
+.stat-card .stat-val{font-family:var(--font-tech);font-size:18px;color:var(--amber);margin-top:2px;line-height:1.1;letter-spacing:.05em}
+.stat-card.on .stat-val{color:var(--green)}
+.stat-card.danger .stat-val{color:var(--red);animation:flicker .4s infinite}
+
+.key-grid{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:60px 60px;gap:5px;flex:0 0 auto}
+.key{position:relative;background:linear-gradient(180deg,#2a2418,#1c1810);
+  border:1px solid var(--line2);border-bottom-width:3px;color:var(--amber);
+  font-family:var(--font-mono);font-weight:700;font-size:18px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  cursor:pointer;transition:transform .05s,background .08s,box-shadow .08s,border-color .08s;
+}
+.key small{font-size:8px;color:var(--text-dim);font-weight:400;letter-spacing:.12em;margin-top:3px}
+.key.empty{background:transparent;border:1px dashed var(--line);cursor:default}
+.key:not(.empty):active,.key.active{
+  background:linear-gradient(180deg,#5a4818,#ffb000);color:var(--bg);
+  border-color:var(--amber);border-bottom-width:1px;transform:translateY(2px);
+  box-shadow:0 0 22px rgba(255,176,0,.55),inset 0 -2px 4px rgba(0,0,0,.35);
+}
+.key.active small,.key:not(.empty):active small{color:rgba(0,0,0,.55)}
+
+.rotate-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;flex:0 0 auto}
+.rotate-row .key{height:40px;font-size:14px}
+
+.btn-row{display:grid;gap:5px;flex:0 0 auto}
+.btn-2{grid-template-columns:1fr 1fr}.btn-3{grid-template-columns:repeat(3,1fr)}.btn-4{grid-template-columns:repeat(4,1fr)}
+.btn{background:var(--panel);border:1px solid var(--line2);color:var(--text);
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;
+  padding:9px 10px;cursor:pointer;text-transform:uppercase;
+  transition:background .1s,color .1s,border-color .1s,box-shadow .1s;
+  display:flex;align-items:center;justify-content:space-between;text-align:left}
+.btn:hover{background:#1f1810;border-color:var(--amber);color:var(--amber)}
+.btn:active{background:var(--amber);color:var(--bg);border-color:var(--amber)}
+.btn .badge{font-size:9px;color:var(--text-mute);letter-spacing:.15em}
+.btn:hover .badge{color:var(--amber-l)}
+.btn.on{background:rgba(255,176,0,.14);border-color:var(--amber);color:var(--amber);box-shadow:inset 0 0 14px rgba(255,176,0,.18)}
+.btn.on .badge{color:var(--amber)}
+.btn.compact{padding:8px 6px;font-size:10px;justify-content:center}
+
+.btn-danger{background:linear-gradient(180deg,#2a0e0a,#1a0805);border:2px solid var(--red-d);
+  color:var(--red);font-size:13px;font-weight:800;padding:12px 50px;letter-spacing:.3em;position:relative;
+  flex:0 0 auto;display:flex;align-items:center;justify-content:center}
+.btn-danger::before,.btn-danger::after{content:"";position:absolute;top:0;bottom:0;width:38px;
+  background:repeating-linear-gradient(45deg,var(--red-d),var(--red-d) 4px,transparent 4px,transparent 8px);opacity:.55}
+.btn-danger::before{left:0}.btn-danger::after{right:0}
+.btn-danger:hover{background:var(--red-d);color:var(--bg);box-shadow:0 0 30px rgba(255,58,46,.5)}
+
+/* ============ LOG ============ */
+.pane-log{grid-area:log}
+.pane-log .panel-body{padding:8px 12px}
+.log-body{overflow-y:auto;flex:1;font-family:var(--font-tech);font-size:11.5px;line-height:1.6;color:var(--text-dim)}
+.log-line{display:flex;gap:10px;padding:1px 4px;border-left:2px solid transparent}
+.log-line:hover{background:rgba(255,176,0,.05);border-left-color:var(--amber)}
+.log-line .ts{color:var(--text-mute);flex:0 0 88px}
+.log-line .kind{flex:0 0 56px;color:var(--amber);font-size:10px;text-transform:uppercase}
+.log-line .msg{color:var(--text);flex:1;word-break:break-all}
+.log-line.kind-cmd .kind{color:var(--cyan)}.log-line.kind-cmd .msg{color:var(--cyan)}
+.log-line.kind-audio .kind{color:var(--amber-l)}
+.log-line.kind-ps3 .kind{color:var(--green)}
+.log-line.kind-sys .kind{color:var(--text-dim)}.log-line.kind-sys .msg{color:var(--text-dim)}
+
+/* ============ SIDE ============ */
+.pane-side{grid-area:side}
+.audio-list{overflow-y:auto;flex:1 1 0;border:1px solid var(--line);background:var(--panel);min-height:80px}
+.audio-item{padding:6px 10px;font-size:10px;color:var(--text-dim);cursor:pointer;
+  border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;
+  font-family:var(--font-tech);letter-spacing:.05em}
+.audio-item:last-child{border-bottom:none}
+.audio-item:hover{color:var(--amber);background:rgba(255,176,0,.05)}
+.audio-item .size{color:var(--text-mute);font-size:9px}
+.audio-empty{padding:24px 12px;text-align:center;color:var(--text-mute);font-size:10px;letter-spacing:.2em}
+.sec-label{font-size:9px;letter-spacing:.22em;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px}
+
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--line2)}
+::-webkit-scrollbar-thumb:hover{background:var(--amber-d)}
+
+@media (max-width:1200px){
+  #app{grid-template-columns:340px 1fr 320px;
+    grid-template-areas:
+      "head head head"
+      "cam  deck side"
+      "tele deck side"
+      "log  log  log";
+    grid-template-rows:54px auto auto 200px}
+}
+@media (max-width:820px){
+  #app{grid-template-rows:54px auto auto auto auto auto;
+    grid-template-columns:1fr;
+    grid-template-areas:"head" "cam" "tele" "deck" "side" "log"}
+  .pane-log{height:220px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="h-brand">ROBOT_CTRL</div>
+    <div class="h-sub">// RPI-01 // 3WD</div>
+    <div class="h-right">
+      <div class="h-stat" title="WebSocket uplink"><div class="dot" id="dotLink"></div><span id="linkText">UPLINK</span></div>
+      <div class="h-stat" title="ESP32 串口"><div class="dot" id="dotSerial"></div><span>SERIAL</span></div>
+      <div class="h-stat" title="ESP32 心跳"><div class="dot" id="dotESP"></div><span id="espText">ESP32</span></div>
+      <div class="h-stat" title="USB 音频"><div class="dot" id="dotAudio"></div><span>AUDIO</span></div>
+      <div class="h-stat" title="USB 摄像头"><div class="dot" id="dotCam"></div><span>CAM</span></div>
+      <div class="h-stat" title="树莓派 CPU 温度"><span style="color:var(--text-mute)">T°</span><span id="cpuTemp">--</span></div>
+      <div class="h-stat" title="启动时长"><span style="color:var(--text-mute)">T+</span><span id="uptime">00:00:00</span></div>
+    </div>
+  </header>
+
+  <section class="panel pane-cam">
+    <div class="panel-head">CAM · LIVE FEED <span class="ph-r" id="camMeta">— FPS</span></div>
+    <div class="panel-body">
+      <div class="cam-frame">
+        <img class="cam-img" id="camImg" alt="" referrerpolicy="no-referrer"/>
+        <svg class="cam-hud" id="camHud" viewBox="0 0 400 300" preserveAspectRatio="none">
+          <g id="hudMode" class="hud-badge">
+            <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#ffb000" stroke-width="1"/>
+            <text x="72" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
+          </g>
+          <g id="hudAlert" opacity="0">
+            <rect x="262" y="6" width="132" height="20" fill="rgba(255,58,46,0.88)" stroke="#ff3a2e" stroke-width="1"/>
+            <text x="328" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="11" fill="#0b0907" letter-spacing="2" font-weight="700">! OBSTACLE !</text>
+          </g>
+          <g id="yoloBoxes"></g>
+        </svg>
+        <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
+        <div class="cam-corner bl"></div><div class="cam-corner br"></div>
+        <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
+        <div class="cam-rec"><div class="recdot"></div>LIVE</div>
+        <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
+      </div>
+
+      <div>
+        <div class="sec-label">YOLO · OBJECT DETECTION</div>
+        <div class="btn-row btn-2" style="margin-bottom:6px">
+          <button class="btn" id="btnYolo"><span>YOLO</span><span class="badge" id="yoloBadge">OFF</span></button>
+          <div class="stat-card" style="text-align:left">
+            <div class="stat-label">INFER · DETS</div>
+            <div class="stat-val" style="font-size:14px" id="yoloStat">— ms · 0</div>
+          </div>
+        </div>
+        <div class="slider-row"><span class="slider-label">CONF</span><input type="range" id="yoloConf" min="0.1" max="0.95" step="0.05" value="0.40"><span class="slider-val" id="yoloConfVal">0.40</span></div>
+        <div class="slider-row"><span class="slider-label">IMGSZ</span><input type="range" id="yoloImgsz" min="192" max="640" step="32" value="416"><span class="slider-val" id="yoloImgszVal">416</span></div>
+        <div class="slider-row"><span class="slider-label">RATE</span><input type="range" id="yoloRate" min="0.2" max="3.0" step="0.1" value="0.5"><span class="slider-val" id="yoloRateVal">0.5s</span></div>
+        <div class="filter-row">
+          <span class="slider-label">FILTER</span>
+          <input type="text" id="yoloFilter" placeholder="all classes — e.g. person,car,bottle" list="yoloClassList" autocomplete="off">
+        </div>
+        <datalist id="yoloClassList"></datalist>
+      </div>
+
+      <div class="sys-grid">
+        <div class="sys-card" id="sysCpu"><div class="sys-label">CPU °C</div><div class="sys-val" id="sysCpuVal">--</div></div>
+        <div class="sys-card" id="sysLoad"><div class="sys-label">LOAD 1m</div><div class="sys-val" id="sysLoadVal">--</div></div>
+        <div class="sys-card" id="sysMem"><div class="sys-label">MEM %</div><div class="sys-val" id="sysMemVal">--</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel pane-tele">
+    <div class="panel-head">TELEMETRY · TOP-DOWN <span class="ph-r" id="schMode">MODE: IDLE</span></div>
+    <div class="panel-body">
+      <div class="schem-wrap">
+        <div class="schem-l">SCHEMATIC_v1.0</div>
+        <div class="schem-r">GRID: 200mm</div>
+        <svg class="schem" id="schem" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <radialGradient id="sonarG" cx="50%" cy="100%" r="100%">
+              <stop offset="0%" stop-color="#ffb000" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="#ffb000" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="sonarR" cx="50%" cy="100%" r="100%">
+              <stop offset="0%" stop-color="#ff3a2e" stop-opacity="0.65"/>
+              <stop offset="100%" stop-color="#ff3a2e" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <line x1="200" y1="30" x2="200" y2="290" stroke="#5a4d2f" stroke-dasharray="2 4" opacity=".5"/>
+          <line x1="60" y1="200" x2="340" y2="200" stroke="#5a4d2f" stroke-dasharray="2 4" opacity=".5"/>
+          <circle cx="200" cy="200" r="60" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <circle cx="200" cy="200" r="100" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <circle cx="200" cy="200" r="140" fill="none" stroke="#3a2f17" stroke-dasharray="1 3"/>
+          <text x="262" y="203" fill="#5a4d2f" font-size="8" font-family="Share Tech Mono">2000</text>
+          <text x="302" y="203" fill="#5a4d2f" font-size="8" font-family="Share Tech Mono">4000</text>
+
+          <g id="vehicle" transform="translate(200 200)">
+            <g id="sonar2" opacity="0" transform="rotate(-50)"></g>
+            <g id="sonar3" opacity="0" transform="rotate(50)"></g>
+            <g id="sonar1" opacity="0"></g>
+
+            <rect x="-58" y="-44" width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
+            <rect x="44"  y="-44" width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
+            <rect x="-58" y="22"  width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
+            <rect x="44"  y="22"  width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
+
+            <rect x="-44" y="-36" width="88" height="72" fill="#1f1a10" stroke="#ffb000" stroke-width="1.5"/>
+            <line x1="-44" y1="-20" x2="44" y2="-20" stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
+            <line x1="-44" y1="0"   x2="44" y2="0"   stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
+            <line x1="-44" y1="20"  x2="44" y2="20"  stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
+
+            <polygon points="-10,-28 10,-28 0,-40" fill="#ffb000"/>
+            <circle cx="0" cy="0" r="2.5" fill="#ffb000"/>
+            <text x="0" y="12" text-anchor="middle" font-size="9" fill="#5a4d2f" font-family="Major Mono Display">RPI-01</text>
+
+            <g><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+               <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S1</text></g>
+            <g transform="rotate(-50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+               <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S2</text></g>
+            <g transform="rotate(50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+               <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S3</text></g>
+          </g>
+          <text x="200" y="20" text-anchor="middle" font-family="Major Mono Display" font-size="10" fill="#5a4d2f" letter-spacing="3">FRONT</text>
+          <text x="200" y="312" text-anchor="middle" font-family="Major Mono Display" font-size="10" fill="#5a4d2f" letter-spacing="3">REAR</text>
+        </svg>
+      </div>
+
+      <div class="ureadings">
+        <div class="ureading" data-id="1">
+          <div class="ureading-label">SENSOR_01 · FRONT</div>
+          <div class="ureading-row"><span class="ureading-val">----</span><span class="ureading-unit">mm</span></div>
+          <div class="ureading-bar"><div style="width:0%"></div></div>
+        </div>
+        <div class="ureading" data-id="2">
+          <div class="ureading-label">SENSOR_02 · L-FRONT</div>
+          <div class="ureading-row"><span class="ureading-val">----</span><span class="ureading-unit">mm</span></div>
+          <div class="ureading-bar"><div style="width:0%"></div></div>
+        </div>
+        <div class="ureading" data-id="3">
+          <div class="ureading-label">SENSOR_03 · R-FRONT</div>
+          <div class="ureading-row"><span class="ureading-val">----</span><span class="ureading-unit">mm</span></div>
+          <div class="ureading-bar"><div style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel pane-deck">
+    <div class="panel-head">INPUT DECK · MANUAL OVERRIDE <span class="ph-r" id="lastActChip">STOP</span></div>
+    <div class="panel-body">
+      <div class="deck-status">
+        <div class="stat-card" id="cardLast">
+          <div class="stat-label">LAST_ACTION</div>
+          <div class="stat-val" id="lastAction">STOP</div>
+        </div>
+        <div class="stat-card" id="cardSpeed">
+          <div class="stat-label">SPEED_PWM</div>
+          <div class="stat-val" id="speedVal">----</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">DRIVE · WASD</div>
+        <div class="key-grid">
+          <div class="key empty"></div>
+          <div class="key" data-press="forward" data-key="w">W<small>FWD</small></div>
+          <div class="key empty"></div>
+          <div class="key" data-press="left" data-key="a">A<small>LEFT</small></div>
+          <div class="key" data-press="backward" data-key="s">S<small>BACK</small></div>
+          <div class="key" data-press="right" data-key="d">D<small>RIGHT</small></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">ROTATE · Q/E</div>
+        <div class="rotate-row">
+          <div class="key" data-press="rotate_ccw" data-key="q">Q<small>CCW</small></div>
+          <div class="key" data-press="rotate_cw" data-key="e">E<small>CW</small></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">MODES & SPEED</div>
+        <div class="btn-row btn-2">
+          <button class="btn" id="btnObs"><span>OBSTACLE</span><span class="badge" id="obsBadge">OFF</span></button>
+          <button class="btn" id="btnUltra"><span>ULTRA_REPORT</span><span class="badge" id="ultraBadge">OFF</span></button>
+          <button class="btn" data-action="speed_down"><span>SPEED −</span><span class="badge">[ - ]</span></button>
+          <button class="btn" data-action="speed_up"><span>SPEED +</span><span class="badge">[ + ]</span></button>
+          <button class="btn" data-action="speed_reset" style="grid-column:span 2;justify-content:center"><span>SPEED RESET</span><span class="badge" style="margin-left:14px">[ 0 ]</span></button>
+        </div>
+      </div>
+
+      <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
+    </div>
+  </section>
+
+  <section class="panel pane-log">
+    <div class="panel-head">EVENT_STREAM · UPLINK BUFFER <span class="ph-r" id="logCount">0 lines</span></div>
+    <div class="panel-body">
+      <div class="log-body" id="logBody"></div>
+    </div>
+  </section>
+
+  <section class="panel pane-side">
+    <div class="panel-head">AUDIO · VOICE I/O</div>
+    <div class="panel-body">
+      <div class="deck-status">
+        <div class="stat-card" id="cardRec">
+          <div class="stat-label">REC_STATE</div>
+          <div class="stat-val" id="recState">IDLE</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">DEVICE</div>
+          <div class="stat-val" style="font-size:13px">USB_AUDIO</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">CAT_VOICE · [ 1 / 2 / 3 / 4 ]</div>
+        <div class="btn-row btn-4">
+          <button class="btn compact" data-action="cat1">CAT_1</button>
+          <button class="btn compact" data-action="cat2">CAT_2</button>
+          <button class="btn compact" data-action="cat3">CAT_3</button>
+          <button class="btn compact" data-action="cat4">CAT_4</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label">MICROPHONE</div>
+        <div class="btn-row btn-2">
+          <button class="btn" id="btnRec"><span>● REC</span><span class="badge">HOLD R</span></button>
+          <button class="btn" id="btnStopAudio"><span>■ STOP</span><span class="badge">[ ESC ]</span></button>
+        </div>
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div class="sec-label">RECORDINGS · CLICK TO PLAY</div>
+        <div class="audio-list" id="recList"><div class="audio-empty">— EMPTY —</div></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = q => document.querySelector(q);
+  const $$ = q => document.querySelectorAll(q);
+  const startTime = Date.now();
+
+  // ============ Camera image ============
+  // Use single <img> with mjpeg endpoint. Add cache-buster on (re)mount.
+  function startCam(){
+    const img = $('#camImg');
+    img.onerror = () => {
+      $('#camErr').style.display = 'flex';
+      setTimeout(() => { img.src = `/api/camera/stream.mjpg?t=${Date.now()}`; }, 1500);
+    };
+    img.onload = () => { $('#camErr').style.display = 'none'; };
+    img.src = `/api/camera/stream.mjpg?t=${Date.now()}`;
+  }
+  startCam();
+
+  // ============ WebSocket ============
+  let ws = null;
+  function connect(){
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    ws.onopen  = () => { $('#dotLink').className = 'dot ok';    $('#linkText').textContent = 'ONLINE'; };
+    ws.onclose = () => { $('#dotLink').className = 'dot error'; $('#linkText').textContent = 'OFFLINE'; setTimeout(connect, 1200); };
+    ws.onerror = () => {};
+    ws.onmessage = ev => {
+      let m; try{ m = JSON.parse(ev.data); }catch(e){ return; }
+      if (m.type === 'snapshot'){ applyState(m.data.state); ($('#logBody')).innerHTML=''; (m.data.logs||[]).forEach(addLog); }
+      else if (m.type === 'state'){ applyState(m.data); }
+      else if (m.type === 'ultra'){ applyUltra(m.data); }
+      else if (m.type === 'log'){ addLog(m.data); }
+      else if (m.type === 'yolo'){
+        renderYoloBoxes(m.data.detections);
+        $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
+      }
+    };
+  }
+  connect();
+
+  // ============ API ============
+  async function cmd(action){
+    try{ await fetch(`/api/cmd/${action}`, {method:'POST'}); } catch(e){ console.error(e); }
+  }
+  async function audioApi(path, body){
+    try{
+      const opts={method:'POST'};
+      if(body){ opts.headers={'Content-Type':'application/json'}; opts.body=JSON.stringify(body); }
+      const r=await fetch(path,opts);
+      const data = r.ok ? await r.json().catch(()=>null) : null;
+      return {ok: r.ok, status: r.status, body: data};
+    }catch(e){return {ok: false, status: 0, body: null};}
+  }
+
+  // ============ Recording state machine (optimistic + revert) ============
+  async function startRec(){
+    if (recording) return false;
+    recording = true;
+    $('#btnRec').classList.add('on');
+    const r = await audioApi('/api/audio/rec/start');
+    // server says we were already recording -> trust server (still on)
+    if (!r.ok){
+      recording = false;
+      $('#btnRec').classList.remove('on');
+      return false;
+    }
+    // server may have refused (already recording / hardware busy) — body.ok=false
+    if (r.body && r.body.ok === false){
+      // keep flag in sync with whatever server thinks (state push will follow)
+      // but our optimistic flip was wrong; let WS state correct us
+    }
+    return true;
+  }
+  async function stopRec(){
+    if (!recording) return;
+    recording = false;
+    $('#btnRec').classList.remove('on');
+    await audioApi('/api/audio/rec/stop');
+    loadRecs();
+  }
+
+  // ============ Emergency (immediate UI sync) ============
+  function doEmergency(){
+    cmd('emergency');
+    // 别等服务器推送,立即清前端互斥状态
+    modeObs = false; modeUltra = false;
+    $('#btnObs').classList.remove('on'); $('#obsBadge').textContent = 'OFF';
+    $('#btnUltra').classList.remove('on'); $('#ultraBadge').textContent = 'OFF';
+  }
+
+  // ============ Health poll ============
+  async function pollHealth(){
+    try{
+      const r = await fetch('/api/health');
+      const h = await r.json();
+      applyHealth(h);
+    }catch(e){
+      ['serial','esp32','audio','camera'].forEach(k => setDot(k, 'error'));
+    }
+  }
+  setInterval(pollHealth, 2000);
+  pollHealth();
+
+  function setDot(key, level){
+    const dotMap = {serial:'dotSerial', esp32:'dotESP', audio:'dotAudio', camera:'dotCam'};
+    const dot = $('#' + dotMap[key]);
+    if (dot) dot.className = 'dot ' + (level === 'ok' ? 'ok' : level === 'warn' ? 'warn' : 'error');
+  }
+
+  function applyHealth(h){
+    const m = h.modules || {};
+    setDot('serial', m.serial?.ok ? 'ok' : 'error');
+    setDot('esp32',  m.esp32?.ok ? 'ok' : 'warn');
+    setDot('audio',  m.audio?.ok ? 'ok' : 'error');
+    const camOk = m.camera?.ok;
+    setDot('camera', camOk ? 'ok' : 'error');
+    $('#camMeta').textContent = camOk ? `${(m.camera?.fps||0).toFixed(1)} FPS · ${(m.camera?.frame_age_ms||0)}ms ago` : 'NO SIGNAL';
+    $('#camOSD').textContent = m.camera?.detail || 'CAM_OFFLINE';
+    if (!camOk) $('#camErr').style.display = 'flex';
+
+    const s = h.system || {};
+    $('#sysCpuVal').textContent = s.cpu_temp_c != null ? s.cpu_temp_c.toFixed(1) : '--';
+    $('#sysCpu').classList.toggle('warn', s.cpu_temp_c != null && s.cpu_temp_c > 70);
+    $('#sysLoadVal').textContent = s.load_1m != null ? s.load_1m.toFixed(2) : '--';
+    $('#sysLoad').classList.toggle('warn', s.load_1m != null && s.load_1m > 3);
+    $('#sysMemVal').textContent = s.mem_pct != null ? s.mem_pct.toFixed(0) + '%' : '--';
+    $('#sysMem').classList.toggle('warn', s.mem_pct != null && s.mem_pct > 85);
+    $('#cpuTemp').textContent = s.cpu_temp_c != null ? s.cpu_temp_c.toFixed(1) + '°C' : '--';
+  }
+
+  // ============ Uptime ============
+  setInterval(() => {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    const hh=String(Math.floor(s/3600)).padStart(2,'0');
+    const mm=String(Math.floor(s/60)%60).padStart(2,'0');
+    const ss=String(s%60).padStart(2,'0');
+    $('#uptime').textContent = `${hh}:${mm}:${ss}`;
+  }, 500);
+
+  // ============ Hold-to-move ============
+  const moveMap = {
+    'w':'forward','arrowup':'forward',
+    's':'backward','arrowdown':'backward',
+    'a':'left','arrowleft':'left',
+    'd':'right','arrowright':'right',
+    'q':'rotate_ccw','e':'rotate_cw',
+  };
+  const HOLD_MS = 100;
+  const holdTimers = {};
+  function startHold(action){
+    if (holdTimers[action]) return;
+    cmd(action);
+    holdTimers[action] = setInterval(() => cmd(action), HOLD_MS);
+  }
+  function stopHold(action){
+    if (!holdTimers[action]) return;
+    clearInterval(holdTimers[action]); delete holdTimers[action];
+    if (Object.keys(holdTimers).length === 0) cmd('stop');
+  }
+
+  // ============ Keyboard ============
+  const pressed = new Set();
+  let recording = false;
+  document.addEventListener('keydown', ev => {
+    if (ev.repeat) return;
+    if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
+    const k = ev.key.toLowerCase();
+    if (moveMap[k]){
+      if (pressed.has(k)) return;
+      pressed.add(k);
+      startHold(moveMap[k]); highlightKey(k, true);
+      ev.preventDefault(); return;
+    }
+    switch(k){
+      case ' ': doEmergency(); ev.preventDefault(); break;
+      case 'escape': cmd('stop'); audioApi('/api/audio/stop'); break;
+      case 'o': setObs(true); break;
+      case 'p': setObs(false); break;
+      case 'u': setUltra(true); break;
+      case 'v': setUltra(false); break;
+      case '+': case '=': cmd('speed_up'); break;
+      case '-': case '_': cmd('speed_down'); break;
+      case '0': case 'm': cmd('speed_reset'); break;
+      case '1': cmd('cat1'); break;
+      case '2': cmd('cat2'); break;
+      case '3': cmd('cat3'); break;
+      case '4': cmd('cat4'); break;
+      case 'r': startRec(); break;
+    }
+  });
+  document.addEventListener('keyup', ev => {
+    const k = ev.key.toLowerCase();
+    if (moveMap[k] && pressed.has(k)){ pressed.delete(k); stopHold(moveMap[k]); highlightKey(k, false); }
+    if (k === 'r') stopRec();
+  });
+  window.addEventListener('blur', () => {
+    pressed.forEach(k => { stopHold(moveMap[k]); highlightKey(k, false); });
+    pressed.clear();
+    stopRec();
+  });
+  function highlightKey(k, on){
+    const el = document.querySelector(`.key[data-key="${k}"]`);
+    if (el) el.classList.toggle('active', on);
+  }
+
+  // ============ Mouse/touch keys ============
+  $$('.key[data-press]').forEach(el => {
+    const action = el.dataset.press;
+    const down = ev => { ev.preventDefault(); startHold(action); el.classList.add('active'); };
+    const up   = ev => { stopHold(action); el.classList.remove('active'); };
+    el.addEventListener('mousedown', down);
+    el.addEventListener('mouseup', up);
+    el.addEventListener('mouseleave', up);
+    el.addEventListener('touchstart', down, {passive:false});
+    el.addEventListener('touchend', up);
+    el.addEventListener('touchcancel', up);
+  });
+
+  // ============ Action buttons ============
+  $$('button.btn[data-action]').forEach(el => {
+    el.addEventListener('click', ev => {
+      ev.preventDefault();
+      const a = el.dataset.action;
+      if (a === 'emergency') doEmergency();
+      else cmd(a);
+    });
+  });
+
+  // ============ Toggles (handle ESP32 mutual exclusion) ============
+  let modeObs = false, modeUltra = false;
+  async function setObs(on){
+    if (on && modeUltra){
+      // ESP32 互斥:开避障必须先关超声波上报
+      cmd('ultra_off');
+      await new Promise(r => setTimeout(r, 150));
+    }
+    cmd(on ? 'obstacle_on' : 'obstacle_off');
+  }
+  async function setUltra(on){
+    if (on && modeObs){
+      cmd('obstacle_off');
+      await new Promise(r => setTimeout(r, 150));
+    }
+    cmd(on ? 'ultra_on' : 'ultra_off');
+  }
+  $('#btnObs').addEventListener('click', () => setObs(!modeObs));
+  $('#btnUltra').addEventListener('click', () => setUltra(!modeUltra));
+
+  // ============ Recording button (hold) ============
+  const btnRec = $('#btnRec');
+  const recDown = ev => { ev.preventDefault(); startRec(); };
+  const recUp   = () => { stopRec(); };
+  btnRec.addEventListener('mousedown', recDown);
+  btnRec.addEventListener('mouseup', recUp);
+  btnRec.addEventListener('mouseleave', recUp);
+  btnRec.addEventListener('touchstart', recDown, {passive:false});
+  btnRec.addEventListener('touchend', recUp);
+  btnRec.addEventListener('touchcancel', recUp);
+  $('#btnStopAudio').addEventListener('click', () => audioApi('/api/audio/stop'));
+
+  // ============ Recordings list ============
+  async function loadRecs(){
+    try{
+      const r = await fetch('/api/recordings'); const j = await r.json();
+      const box = $('#recList');
+      if (!j.items || j.items.length===0){ box.innerHTML='<div class="audio-empty">— EMPTY —</div>'; return; }
+      box.innerHTML = '';
+      j.items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'audio-item';
+        const kb = (it.size/1024).toFixed(0);
+        const ts = new Date(it.mtime*1000);
+        const ago = formatAgo(ts);
+        row.innerHTML = `<span>▸ ${escapeHtml(it.name)}</span><span class="size">${kb}K · ${ago}</span>`;
+        row.onclick = () => audioApi('/api/audio/play', {name: it.name, src: 'recordings'});
+        box.appendChild(row);
+      });
+    } catch(e){}
+  }
+  loadRecs(); setInterval(loadRecs, 6000);
+
+  function formatAgo(d){
+    const dt = (Date.now()-d.getTime())/1000;
+    if (dt<60) return `${Math.floor(dt)}s`;
+    if (dt<3600) return `${Math.floor(dt/60)}m`;
+    if (dt<86400) return `${Math.floor(dt/3600)}h`;
+    return `${Math.floor(dt/86400)}d`;
+  }
+  function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
+
+  // ============ State / telemetry ============
+  function applyState(s){
+    if (!s) return;
+    if (s.modes){
+      modeObs = !!s.modes.obstacle; modeUltra = !!s.modes.ultra_report;
+      $('#btnObs').classList.toggle('on', modeObs);
+      $('#obsBadge').textContent = modeObs ? 'ON' : 'OFF';
+      $('#btnUltra').classList.toggle('on', modeUltra);
+      $('#ultraBadge').textContent = modeUltra ? 'ON' : 'OFF';
+    }
+    if (s.last_action){
+      $('#lastAction').textContent = s.last_action;
+      $('#lastActChip').textContent = s.last_action;
+    }
+    if (s.speed != null) $('#speedVal').textContent = String(s.speed);
+    const rec = !!s.recording;
+    $('#recState').textContent = rec ? 'RECORDING' : 'IDLE';
+    $('#cardRec').classList.toggle('on', rec);
+    const em = s.modes && s.modes.emergency;
+    $('#espText').textContent = em ? 'E-STOP' : 'ESP32';
+    $('#cardLast').classList.toggle('danger', em);
+    let mode = 'IDLE';
+    if (em) mode = 'E-STOP';
+    else if (modeObs) mode = 'AUTO-AVOID';
+    else if (modeUltra) mode = 'TELEMETRY';
+    else if (s.last_action && s.last_action !== 'STOP') mode = s.last_action;
+    $('#schMode').textContent = `MODE: ${mode}`;
+    updateHudMode(em);
+    if (s.ultra) applyUltra(s.ultra);
+  }
+
+  // ============ HUD overlay (mode badge + obstacle alert) ============
+  function updateHudFromUltra(u){
+    const anyDanger = [1,2,3].some(id => u[id] && u[id].has_obstacle);
+    const alertEl = document.getElementById('hudAlert');
+    if (alertEl) alertEl.setAttribute('opacity', anyDanger ? '1' : '0');
+  }
+  function updateHudMode(em){
+    let mode = 'STANDBY';
+    if (em) mode = '! E-STOP !';
+    else if (modeObs) mode = 'AUTO-AVOID';
+    else if (modeUltra) mode = 'TELEMETRY';
+    const t = document.getElementById('hudModeText');
+    if (t) t.textContent = mode;
+    const rect = document.querySelector('#hudMode rect');
+    if (rect){
+      rect.setAttribute('stroke', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
+    }
+    if (t) t.setAttribute('fill', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
+  }
+
+  function applyUltra(u){
+    const MAX = 4000;
+    [1,2,3].forEach(id => {
+      const data = u[id];
+      const card = document.querySelector(`.ureading[data-id="${id}"]`);
+      if (!card) return;
+      const valEl = card.querySelector('.ureading-val');
+      const bar = card.querySelector('.ureading-bar > div');
+      const sonar = document.getElementById('sonar' + id);
+      if (!data){
+        valEl.textContent='----'; bar.style.width='0%';
+        card.classList.remove('danger'); valEl.classList.remove('danger');
+        if (sonar) sonar.setAttribute('opacity','0');
+        return;
+      }
+      valEl.textContent = String(data.distance_mm).padStart(4,'0');
+      bar.style.width = Math.min(100,(data.distance_mm/MAX)*100) + '%';
+      const danger = !!data.has_obstacle;
+      card.classList.toggle('danger', danger);
+      valEl.classList.toggle('danger', danger);
+      if (sonar){
+        sonar.setAttribute('opacity','1');
+        const len = Math.min(120, (data.distance_mm/MAX)*100 + 20);
+        const half = len*0.55;
+        const color = danger ? 'url(#sonarR)' : 'url(#sonarG)';
+        const strokeColor = danger ? '#ff3a2e' : '#ffb000';
+        sonar.innerHTML = `
+          <path d="M 0 -40 L ${-half} ${-40-len} A ${len*1.1} ${len*1.1} 0 0 1 ${half} ${-40-len} Z"
+                fill="${color}" stroke="${strokeColor}" stroke-width="0.5" opacity="0.7"/>
+          <line x1="0" y1="-40" x2="0" y2="${-40-len-4}" stroke="${strokeColor}" stroke-width="0.5" opacity="0.8"/>
+          <text x="0" y="${-44-len}" text-anchor="middle" font-size="11"
+                fill="${strokeColor}" font-family="Share Tech Mono" font-weight="700">${data.distance_mm}</text>
+        `;
+      }
+    });
+    updateHudFromUltra(u);
+  }
+
+  // ============ YOLO control ============
+  // 类别 id → 稳定颜色(避免每帧 random 闪烁)
+  const yoloPalette = ['#7fff5a','#ffb000','#5af0ff','#ff5af0','#ff8a2e','#a5e8ff','#ffd266','#7affb0','#ff9a9a','#c19aff'];
+  const yoloColor = id => yoloPalette[(id|0) % yoloPalette.length];
+
+  function renderYoloBoxes(dets){
+    const layer = document.getElementById('yoloBoxes');
+    if (!layer) return;
+    if (!dets || dets.length === 0){ layer.innerHTML = ''; return; }
+    // SVG viewBox 是 0..400 x 0..300, preserveAspectRatio=none 让 SVG 拉伸到 cam-frame
+    const VW = 400, VH = 300;
+    let html = '';
+    dets.forEach(d => {
+      const x = d.x * VW, y = d.y * VH, w = d.w * VW, h = d.h * VH;
+      const c = yoloColor(d.cls);
+      const text = `${d.label} ${Math.round(d.conf * 100)}`;
+      const tw = Math.min(VW - x, text.length * 6 + 8);
+      html += `<rect class="yolo-box-rect" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" stroke="${c}"/>`;
+      html += `<rect x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" width="${tw}" height="11" fill="${c}" opacity="0.92"/>`;
+      html += `<text class="yolo-box-label" x="${(x+3).toFixed(1)}" y="${(y-2).toFixed(1)}">${text}</text>`;
+    });
+    layer.innerHTML = html;
+  }
+
+  async function yoloPost(body){
+    try{
+      const r = await fetch('/api/yolo/config', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      });
+      return r.ok;
+    }catch(e){ return false; }
+  }
+
+  let yoloEnabled = false;
+  const yoloBtn = $('#btnYolo');
+  const yoloConfSlider = $('#yoloConf'),  yoloConfVal  = $('#yoloConfVal');
+  const yoloImgszSlider = $('#yoloImgsz'), yoloImgszVal = $('#yoloImgszVal');
+  const yoloRateSlider = $('#yoloRate'),  yoloRateVal  = $('#yoloRateVal');
+
+  yoloBtn.addEventListener('click', async () => {
+    yoloEnabled = !yoloEnabled;
+    yoloBtn.classList.toggle('on', yoloEnabled);
+    $('#yoloBadge').textContent = yoloEnabled ? 'ON' : 'OFF';
+    await yoloPost({enabled: yoloEnabled});
+    if (!yoloEnabled){ renderYoloBoxes([]); $('#yoloStat').textContent = '— ms · 0'; }
+  });
+  yoloConfSlider.addEventListener('input', e => yoloConfVal.textContent = parseFloat(e.target.value).toFixed(2));
+  yoloConfSlider.addEventListener('change', e => yoloPost({conf: parseFloat(e.target.value)}));
+  yoloImgszSlider.addEventListener('input', e => yoloImgszVal.textContent = e.target.value);
+  yoloImgszSlider.addEventListener('change', e => yoloPost({imgsz: parseInt(e.target.value)}));
+  yoloRateSlider.addEventListener('input', e => yoloRateVal.textContent = parseFloat(e.target.value).toFixed(1) + 's');
+  yoloRateSlider.addEventListener('change', e => yoloPost({min_interval: parseFloat(e.target.value)}));
+
+  // 类别过滤
+  const yoloFilterInput = $('#yoloFilter');
+  let yoloNameToId = {};   // {"person":0, ...}
+  let yoloIdToName = {};
+
+  yoloFilterInput.addEventListener('change', () => {
+    const txt = yoloFilterInput.value.trim();
+    if (!txt){ yoloPost({classes: null}); return; }
+    const ids = txt.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      .map(s => /^\d+$/.test(s) ? parseInt(s) : yoloNameToId[s])
+      .filter(x => Number.isInteger(x));
+    yoloPost({classes: ids.length ? ids : null});
+  });
+
+  // 拉一次状态同步初始 UI(服务可能已经 enabled = true 持久化的状态)
+  fetch('/api/yolo/status').then(r => r.json()).then(s => {
+    if (!s.available) {
+      yoloBtn.disabled = true;
+      yoloBtn.style.opacity = '0.4';
+      $('#yoloBadge').textContent = 'N/A';
+      return;
+    }
+    yoloEnabled = !!s.enabled;
+    yoloBtn.classList.toggle('on', yoloEnabled);
+    $('#yoloBadge').textContent = yoloEnabled ? 'ON' : 'OFF';
+    if (s.config){
+      yoloConfSlider.value = s.config.conf;
+      yoloConfVal.textContent = parseFloat(s.config.conf).toFixed(2);
+      yoloImgszSlider.value = s.config.imgsz;
+      yoloImgszVal.textContent = s.config.imgsz;
+      yoloRateSlider.value = s.config.min_interval;
+      yoloRateVal.textContent = parseFloat(s.config.min_interval).toFixed(1) + 's';
+    }
+    // 填充 datalist + 构建映射
+    if (s.model_classes){
+      const dl = $('#yoloClassList');
+      dl.innerHTML = s.model_classes.map(c => `<option value="${c.name}">`).join('');
+      s.model_classes.forEach(c => {
+        yoloNameToId[c.name.toLowerCase()] = c.id;
+        yoloIdToName[c.id] = c.name;
+      });
+    }
+    // 持久化的 classes 反显
+    if (s.config && Array.isArray(s.config.classes) && s.config.classes.length){
+      yoloFilterInput.value = s.config.classes.map(id => yoloIdToName[id] || id).join(',');
+    }
+  }).catch(() => {});
+
+  // ============ Log ============
+  const MAX_LOG = 300;
+  let logCount = 0;
+  function addLog(entry){
+    const box = $('#logBody');
+    const line = document.createElement('div');
+    const kind = entry.kind || 'esp32';
+    line.className = `log-line kind-${kind}`;
+    const d = new Date(entry.t);
+    const ts = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).padStart(3,'0')}`;
+    line.innerHTML = `<span class="ts">${ts}</span><span class="kind">${kind}</span><span class="msg"></span>`;
+    line.querySelector('.msg').textContent = entry.line;
+    box.appendChild(line);
+    while (box.children.length > MAX_LOG) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+    logCount++;
+    $('#logCount').textContent = `${logCount} lines`;
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def get_lan_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+if __name__ == "__main__":
+    import uvicorn
+    ip = get_lan_ip()
+    print(f"╔═══════════════════════════════════════════╗")
+    print(f"║  ROBOT CONTROL UNIT // RPI-01             ║")
+    print(f"╠═══════════════════════════════════════════╣")
+    print(f"║  http://{ip}:8000")
+    print(f"║  http://localhost:8000")
+    print(f"╚═══════════════════════════════════════════╝")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
