@@ -3,1576 +3,1763 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hunter · AI Cat Companion</title>
+<title>HUNTER — Embodied AI for Cats</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;700&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #07070f;
-    --bg2: #0e0e1a;
-    --bg3: #14142a;
-    --card: #12121f;
-    --border: rgba(255,255,255,0.07);
-    --accent: #7c6fff;
-    --accent2: #ff6b8a;
-    --accent3: #43e8b0;
-    --text: #e2e2f0;
-    --muted: #7a7a9a;
-    --gold: #ffd166;
-  }
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  html { scroll-behavior: smooth; }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'Inter', 'Noto Sans SC', sans-serif;
-    line-height: 1.7;
-    overflow-x: hidden;
-  }
-
-  /* ── NOISE OVERLAY ── */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  /* ── NAV ── */
-  nav {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    z-index: 100;
-    padding: 0 48px;
-    height: 64px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: rgba(7,7,15,0.85);
-    backdrop-filter: blur(20px);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .nav-logo {
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: 0.15em;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-
-  .nav-links {
-    display: flex;
-    gap: 32px;
-    list-style: none;
-  }
-
-  .nav-links a {
-    color: var(--muted);
-    text-decoration: none;
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    transition: color 0.2s;
-  }
-
-  .nav-links a:hover { color: var(--text); }
-
-  /* ── HERO ── */
-  .hero {
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 120px 48px 80px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .hero-glow {
-    position: absolute;
-    width: 800px; height: 800px;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(124,111,255,0.12) 0%, transparent 70%);
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-  }
-
-  .hero-tag {
-    display: inline-block;
-    padding: 6px 16px;
-    background: rgba(124,111,255,0.12);
-    border: 1px solid rgba(124,111,255,0.3);
-    border-radius: 100px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--accent);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    margin-bottom: 32px;
-  }
-
-  .hero h1 {
-    font-size: clamp(56px, 10vw, 120px);
-    font-weight: 700;
-    letter-spacing: -0.03em;
-    line-height: 1;
-    margin-bottom: 24px;
-    background: linear-gradient(135deg, #fff 30%, rgba(255,255,255,0.5));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-
-  .hero-sub {
-    font-size: clamp(16px, 2vw, 20px);
-    color: var(--muted);
-    max-width: 600px;
-    margin: 0 auto 16px;
-    font-weight: 300;
-  }
-
-  .hero-slogan {
-    font-size: 18px;
-    color: var(--text);
-    font-weight: 500;
-    margin-bottom: 56px;
-  }
-
-  .hero-slogan em { color: var(--accent); font-style: normal; }
-
-  .hero-stats {
-    display: flex;
-    gap: 48px;
-    justify-content: center;
-    flex-wrap: wrap;
-  }
-
-  .stat {
-    text-align: center;
-  }
-
-  .stat-num {
-    font-size: 36px;
-    font-weight: 700;
-    color: var(--text);
-    display: block;
-    line-height: 1;
-    margin-bottom: 6px;
-  }
-
-  .stat-num span { color: var(--accent); }
-
-  .stat-label {
-    font-size: 12px;
-    color: var(--muted);
-    letter-spacing: 0.05em;
-  }
-
-  /* ── SECTION ── */
-  section {
-    padding: 120px 48px;
-    max-width: 1200px;
-    margin: 0 auto;
-    position: relative;
-  }
-
-  .section-tag {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin-bottom: 16px;
-    display: block;
-  }
-
-  h2 {
-    font-size: clamp(32px, 5vw, 52px);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
-    margin-bottom: 24px;
-  }
-
-  .section-desc {
-    font-size: 17px;
-    color: var(--muted);
-    max-width: 640px;
-    margin-bottom: 64px;
-    line-height: 1.8;
-  }
-
-  /* ── DIVIDER ── */
-  .divider {
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--border), transparent);
-    margin: 0 48px;
-  }
-
-  /* ── DATA TABLE ── */
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    margin-bottom: 48px;
-  }
-
-  .data-table th {
-    text-align: left;
-    padding: 12px 20px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .data-table td {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text);
-  }
-
-  .data-table tr:hover td { background: rgba(124,111,255,0.04); }
-
-  .data-table .num {
-    font-weight: 700;
-    color: var(--accent);
-    font-size: 15px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .data-table .src {
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  /* ── STORY BLOCK ── */
-  .story-block {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-    border-radius: 12px;
-    padding: 40px 48px;
-    margin-bottom: 48px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .story-block::before {
-    content: '"';
-    position: absolute;
-    top: -20px; left: 24px;
-    font-size: 120px;
-    color: rgba(124,111,255,0.08);
-    font-family: Georgia, serif;
-    line-height: 1;
-  }
-
-  .story-block p {
-    font-size: 17px;
-    line-height: 1.9;
-    color: var(--text);
-    position: relative;
-  }
-
-  .story-block p + p { margin-top: 16px; }
-
-  /* ── SELLING POINTS ── */
-  .points-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 24px;
-  }
-
-  .point-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 36px;
-    transition: border-color 0.3s, transform 0.3s;
-    cursor: default;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .point-card::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(circle at 80% 20%, rgba(124,111,255,0.06), transparent 60%);
-    opacity: 0;
-    transition: opacity 0.3s;
-  }
-
-  .point-card:hover {
-    border-color: rgba(124,111,255,0.4);
-    transform: translateY(-4px);
-  }
-
-  .point-card:hover::after { opacity: 1; }
-
-  .point-num {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.15em;
-    color: var(--accent);
-    margin-bottom: 16px;
-    display: block;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .point-card h3 {
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 16px;
-    line-height: 1.3;
-    letter-spacing: -0.01em;
-  }
-
-  .point-card p {
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.8;
-  }
-
-  .point-dim {
-    margin-top: 24px;
-    padding-top: 20px;
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--accent);
-    font-weight: 500;
-    letter-spacing: 0.05em;
-  }
-
-  /* ── FEATURES ── */
-  .features-nav {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 40px;
-  }
-
-  .feat-btn {
-    padding: 8px 18px;
-    border: 1px solid var(--border);
-    border-radius: 100px;
-    background: transparent;
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    font-family: inherit;
-  }
-
-  .feat-btn:hover { border-color: var(--accent); color: var(--text); }
-  .feat-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-
-  .feat-panel { display: none; }
-  .feat-panel.active { display: block; }
-
-  .feat-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 20px;
-  }
-
-  .feat-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 28px;
-    transition: border-color 0.2s;
-  }
-
-  .feat-card:hover { border-color: rgba(124,111,255,0.3); }
-
-  .feat-card h4 {
-    font-size: 15px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .feat-icon {
-    width: 28px; height: 28px;
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    flex-shrink: 0;
-  }
-
-  .feat-p0 .feat-icon { background: rgba(124,111,255,0.15); }
-  .feat-p1 .feat-icon { background: rgba(67,232,176,0.15); }
-  .feat-p2 .feat-icon { background: rgba(255,107,138,0.15); }
-
-  .feat-card p { font-size: 13px; color: var(--muted); line-height: 1.7; }
-
-  .feat-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    margin-bottom: 12px;
-  }
-
-  .badge-p0 { background: rgba(124,111,255,0.15); color: var(--accent); }
-  .badge-p1 { background: rgba(67,232,176,0.15); color: var(--accent3); }
-  .badge-p1-done { background: rgba(67,232,176,0.25); color: var(--accent3); }
-  .badge-p2 { background: rgba(255,107,138,0.15); color: var(--accent2); }
-
-  /* ── 5W1H TABLE ── */
-  .w1h-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-
-  .w1h-table th {
-    padding: 14px 20px;
-    background: var(--bg3);
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    border-bottom: 1px solid var(--border);
-    text-align: left;
-    width: 100px;
-  }
-
-  .w1h-table td {
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text);
-    line-height: 1.7;
-  }
-
-  .w1h-table tr:last-child th,
-  .w1h-table tr:last-child td { border-bottom: none; }
-
-  /* ── ARCHITECTURE FLOW ── */
-  .flow-container {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 48px;
-    margin-bottom: 40px;
-  }
-
-  .flow {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0;
-  }
-
-  .flow-node {
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px 32px;
-    text-align: center;
-    font-size: 14px;
-    font-weight: 500;
-    max-width: 420px;
-    width: 100%;
-    transition: border-color 0.2s, background 0.2s;
-    cursor: default;
-  }
-
-  .flow-node:hover {
-    border-color: var(--accent);
-    background: rgba(124,111,255,0.08);
-  }
-
-  .flow-node.highlight { border-color: var(--accent); background: rgba(124,111,255,0.1); }
-  .flow-node.highlight2 { border-color: var(--accent3); background: rgba(67,232,176,0.08); }
-  .flow-node.highlight3 { border-color: var(--accent2); background: rgba(255,107,138,0.08); }
-
-  .flow-node .node-label {
-    font-size: 11px;
-    color: var(--muted);
-    font-weight: 400;
-    display: block;
-    margin-top: 4px;
-  }
-
-  .flow-arrow {
-    color: var(--muted);
-    font-size: 20px;
-    line-height: 1;
-    padding: 8px 0;
-  }
-
-  .flow-split {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    width: 100%;
-    max-width: 620px;
-  }
-
-  .flow-split .flow-node { max-width: none; }
-
-  /* ── BUSINESS MODEL ── */
-  .biz-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 48px;
-  }
-
-  .biz-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
-    transition: border-color 0.2s;
-  }
-
-  .biz-card:hover { border-color: rgba(124,111,255,0.3); }
-
-  .biz-price {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--gold);
-    display: block;
-    margin-bottom: 6px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .biz-name {
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: var(--text);
-  }
-
-  .biz-desc { font-size: 12px; color: var(--muted); line-height: 1.6; }
-
-  .ltv-box {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 40px 48px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 48px;
-    align-items: center;
-  }
-
-  .ltv-rows { display: flex; flex-direction: column; gap: 12px; }
-
-  .ltv-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .ltv-row:last-child { border-bottom: none; }
-  .ltv-label { font-size: 13px; color: var(--muted); }
-  .ltv-val { font-size: 15px; font-weight: 600; color: var(--text); font-family: 'JetBrains Mono', monospace; }
-  .ltv-total .ltv-label { color: var(--text); font-weight: 600; font-size: 14px; }
-  .ltv-total .ltv-val { color: var(--gold); font-size: 20px; }
-
-  .ltv-ratio {
-    text-align: center;
-  }
-
-  .ltv-ratio-num {
-    font-size: 80px;
-    font-weight: 700;
-    line-height: 1;
-    font-family: 'JetBrains Mono', monospace;
-    background: linear-gradient(135deg, var(--accent3), var(--accent));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-
-  .ltv-ratio-label {
-    font-size: 13px;
-    color: var(--muted);
-    margin-top: 8px;
-  }
-
-  /* ── COMPETITION TABLE ── */
-  .comp-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-  }
-
-  .comp-table th {
-    padding: 14px 20px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
-    text-align: center;
-    letter-spacing: 0.05em;
-  }
-
-  .comp-table th:first-child { text-align: left; }
-
-  .comp-table td {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    text-align: center;
-    color: var(--muted);
-  }
-
-  .comp-table td:first-child { text-align: left; font-weight: 500; color: var(--text); }
-
-  .comp-table .hunter-col { background: rgba(124,111,255,0.05); }
-
-  .comp-table th.hunter-col { color: var(--accent); }
-
-  .check { color: var(--accent3); font-size: 16px; }
-  .cross { color: #444; font-size: 16px; }
-  .partial { color: var(--gold); font-size: 16px; }
-
-  /* ── PITCH STRATEGY ── */
-  .timeline {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    position: relative;
-    padding-left: 32px;
-  }
-
-  .timeline::before {
-    content: '';
-    position: absolute;
-    left: 8px; top: 0; bottom: 0;
-    width: 1px;
-    background: linear-gradient(180deg, var(--accent), transparent);
-  }
-
-  .tl-item {
-    display: flex;
-    gap: 24px;
-    padding-bottom: 40px;
-    position: relative;
-  }
-
-  .tl-dot {
-    position: absolute;
-    left: -28px;
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    background: var(--accent);
-    border: 2px solid var(--bg);
-    top: 4px;
-    box-shadow: 0 0 12px rgba(124,111,255,0.5);
-    flex-shrink: 0;
-  }
-
-  .tl-time {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--accent);
-    font-family: 'JetBrains Mono', monospace;
-    white-space: nowrap;
-    padding-top: 2px;
-    min-width: 60px;
-  }
-
-  .tl-content h4 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-  .tl-content p { font-size: 13px; color: var(--muted); line-height: 1.7; }
-
-  /* ── QUOTES ── */
-  .quotes-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 16px;
-  }
-
-  .quote-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 28px;
-    position: relative;
-    transition: border-color 0.2s, transform 0.2s;
-  }
-
-  .quote-card:hover {
-    border-color: rgba(124,111,255,0.4);
-    transform: translateY(-2px);
-  }
-
-  .quote-num {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--muted);
-    margin-bottom: 12px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .quote-text {
-    font-size: 15px;
-    font-weight: 500;
-    line-height: 1.6;
-    color: var(--text);
-  }
-
-  .quote-text em {
-    color: var(--accent);
-    font-style: normal;
-    font-weight: 700;
-  }
-
-  /* ── RATINGS ── */
-  .ratings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-  }
-
-  .rating-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 28px 24px;
-    text-align: center;
-  }
-
-  .rating-label {
-    font-size: 12px;
-    color: var(--muted);
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    margin-bottom: 16px;
-    display: block;
-  }
-
-  .stars {
-    font-size: 22px;
-    letter-spacing: 3px;
-    display: block;
-    margin-bottom: 12px;
-  }
-
-  .rating-reason {
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.6;
-  }
-
-  /* ── FOOTER ── */
-  footer {
-    text-align: center;
-    padding: 64px 48px;
-    border-top: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 13px;
-  }
-
-  footer .footer-logo {
-    font-size: 28px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    display: block;
-    margin-bottom: 16px;
-  }
-
-  /* ── SCROLL ANIMATION ── */
-  .reveal {
-    opacity: 0;
-    transform: translateY(32px);
-    transition: opacity 0.7s ease, transform 0.7s ease;
-  }
-
-  .reveal.visible {
-    opacity: 1;
-    transform: translateY(0);
-  }
-
-  /* ── FEATURE DETAIL MODAL ── */
-  .modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(7,7,15,0.9);
-    backdrop-filter: blur(12px);
-    z-index: 200;
-    align-items: center;
-    justify-content: center;
-    padding: 40px;
-  }
-
-  .modal-overlay.open { display: flex; }
-
-  .modal {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 48px;
-    max-width: 720px;
-    width: 100%;
-    max-height: 80vh;
-    overflow-y: auto;
-    position: relative;
-  }
-
-  .modal-close {
-    position: absolute;
-    top: 20px; right: 20px;
-    background: none;
-    border: none;
-    color: var(--muted);
-    font-size: 24px;
-    cursor: pointer;
-    line-height: 1;
-    padding: 4px;
-    transition: color 0.2s;
-  }
-
-  .modal-close:hover { color: var(--text); }
-
-  .modal h3 { font-size: 22px; font-weight: 600; margin-bottom: 24px; }
-
-  @media (max-width: 768px) {
-    nav { padding: 0 20px; }
-    .nav-links { display: none; }
-    section { padding: 80px 20px; }
-    .hero { padding: 100px 20px 60px; }
-    .hero-stats { gap: 24px; }
-    .ltv-box { grid-template-columns: 1fr; }
-    .flow-split { grid-template-columns: 1fr; }
-  }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --black:#000008;
+  --cyan:#00e5ff;
+  --red:#ff2952;
+  --green:#00ff9d;
+  --amber:#ffb800;
+  --dim:#0a0a14;
+  --surface:#0d0d1a;
+  --border:#1a1a2e;
+  --text:#c8d0e0;
+  --text-dim:#5a6075;
+  --font-sans:'Space Grotesk',sans-serif;
+  --font-mono:'JetBrains Mono',monospace;
+}
+html{scroll-behavior:smooth}
+body{
+  background:var(--black);
+  color:var(--text);
+  font-family:var(--font-sans);
+  font-size:16px;
+  line-height:1.6;
+  overflow-x:hidden;
+}
+
+/* SCANLINE OVERLAY */
+body::before{
+  content:'';
+  position:fixed;
+  inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,229,255,.018) 2px,rgba(0,229,255,.018) 4px);
+  pointer-events:none;
+  z-index:9999;
+}
+
+/* GRID BACKGROUND */
+body::after{
+  content:'';
+  position:fixed;
+  inset:0;
+  background-image:
+    linear-gradient(rgba(0,229,255,.04) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,229,255,.04) 1px,transparent 1px);
+  background-size:60px 60px;
+  pointer-events:none;
+  z-index:0;
+}
+
+/* NAV */
+nav{
+  position:fixed;
+  top:0;left:0;right:0;
+  z-index:1000;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0 48px;
+  height:60px;
+  background:rgba(0,0,8,.85);
+  backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border);
+}
+.nav-logo{
+  font-family:var(--font-mono);
+  font-size:18px;
+  font-weight:700;
+  color:var(--cyan);
+  letter-spacing:.2em;
+  text-shadow:0 0 20px rgba(0,229,255,.6);
+}
+.nav-links{display:flex;gap:32px}
+.nav-links a{
+  font-family:var(--font-mono);
+  font-size:12px;
+  letter-spacing:.12em;
+  color:var(--text-dim);
+  text-decoration:none;
+  text-transform:uppercase;
+  transition:color .2s;
+}
+.nav-links a:hover{color:var(--cyan)}
+
+/* HERO */
+#hero{
+  position:relative;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+  z-index:1;
+}
+#particle-canvas{
+  position:absolute;
+  inset:0;
+  width:100%;height:100%;
+}
+.hero-content{
+  position:relative;
+  z-index:2;
+  text-align:center;
+}
+.hero-label{
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.3em;
+  color:var(--cyan);
+  text-transform:uppercase;
+  margin-bottom:24px;
+  opacity:.8;
+}
+.hero-title{
+  font-family:var(--font-mono);
+  font-size:clamp(72px,12vw,160px);
+  font-weight:700;
+  color:#fff;
+  letter-spacing:.05em;
+  line-height:1;
+  position:relative;
+  display:inline-block;
+}
+.glitch{
+  position:relative;
+  display:inline-block;
+}
+.glitch::before,.glitch::after{
+  content:attr(data-text);
+  position:absolute;
+  inset:0;
+  font-family:var(--font-mono);
+  font-size:inherit;
+  font-weight:inherit;
+  letter-spacing:inherit;
+  line-height:inherit;
+  color:#fff;
+}
+.glitch::before{
+  left:2px;top:-2px;
+  color:var(--cyan);
+  clip-path:polygon(0 30%,100% 30%,100% 50%,0 50%);
+  animation:glitch-top 4s infinite;
+  opacity:.7;
+}
+.glitch::after{
+  left:-2px;top:2px;
+  color:var(--red);
+  clip-path:polygon(0 60%,100% 60%,100% 80%,0 80%);
+  animation:glitch-bot 4s infinite;
+  opacity:.7;
+}
+@keyframes glitch-top{
+  0%,92%,100%{transform:translate(0)}
+  93%{transform:translate(-4px,1px)}
+  95%{transform:translate(4px,-1px)}
+  97%{transform:translate(-2px,0)}
+}
+@keyframes glitch-bot{
+  0%,92%,100%{transform:translate(0)}
+  93%{transform:translate(4px,1px)}
+  95%{transform:translate(-4px,-1px)}
+  97%{transform:translate(2px,0)}
+}
+.hero-sub{
+  font-family:var(--font-mono);
+  font-size:clamp(12px,2vw,18px);
+  color:var(--text-dim);
+  margin-top:16px;
+  letter-spacing:.1em;
+  min-height:1.4em;
+}
+.cursor{
+  display:inline-block;
+  width:2px;height:1em;
+  background:var(--cyan);
+  vertical-align:middle;
+  margin-left:2px;
+  animation:blink .8s infinite;
+}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+.hero-stats{
+  display:flex;
+  gap:48px;
+  margin-top:64px;
+  justify-content:center;
+}
+.stat-item{text-align:center}
+.stat-num{
+  font-family:var(--font-mono);
+  font-size:36px;
+  font-weight:700;
+  color:var(--cyan);
+  text-shadow:0 0 30px rgba(0,229,255,.5);
+  display:block;
+}
+.stat-label{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  color:var(--text-dim);
+  text-transform:uppercase;
+}
+
+.scroll-hint{
+  position:absolute;
+  bottom:40px;
+  left:50%;
+  transform:translateX(-50%);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:8px;
+  z-index:2;
+}
+.scroll-hint span{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  color:var(--text-dim);
+  text-transform:uppercase;
+}
+.scroll-arrow{
+  width:1px;
+  height:40px;
+  background:linear-gradient(to bottom,var(--cyan),transparent);
+  animation:scroll-pulse 2s infinite;
+}
+@keyframes scroll-pulse{
+  0%,100%{opacity:.3;transform:scaleY(1)}
+  50%{opacity:1;transform:scaleY(1.2)}
+}
+
+/* SECTIONS */
+section{
+  position:relative;
+  z-index:1;
+  padding:120px 0;
+}
+.container{
+  max-width:1100px;
+  margin:0 auto;
+  padding:0 40px;
+}
+.section-tag{
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.3em;
+  color:var(--cyan);
+  text-transform:uppercase;
+  margin-bottom:16px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.section-tag::before{
+  content:'';
+  width:32px;height:1px;
+  background:var(--cyan);
+  box-shadow:0 0 8px var(--cyan);
+}
+.section-title{
+  font-size:clamp(32px,5vw,56px);
+  font-weight:700;
+  color:#fff;
+  line-height:1.1;
+  margin-bottom:24px;
+}
+.section-title span{color:var(--cyan)}
+.section-desc{
+  font-size:16px;
+  color:var(--text-dim);
+  max-width:600px;
+  line-height:1.8;
+}
+
+/* SEPARATOR */
+.sep{
+  width:100%;height:1px;
+  background:linear-gradient(90deg,transparent,var(--border),transparent);
+}
+
+/* DATA TABLE */
+.data-table{
+  width:100%;
+  border-collapse:collapse;
+  font-family:var(--font-mono);
+  font-size:13px;
+  margin-top:48px;
+}
+.data-table th{
+  text-align:left;
+  padding:12px 20px;
+  color:var(--cyan);
+  font-size:10px;
+  letter-spacing:.2em;
+  text-transform:uppercase;
+  border-bottom:1px solid var(--border);
+  background:rgba(0,229,255,.04);
+}
+.data-table td{
+  padding:14px 20px;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  color:var(--text);
+}
+.data-table tr:hover td{background:rgba(0,229,255,.03)}
+.data-table .val{color:#fff;font-weight:700}
+.data-table .bad{color:var(--red)}
+.data-table .good{color:var(--green)}
+
+/* STORY BLOCK */
+.story-block{
+  margin-top:72px;
+  padding:48px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-left:3px solid var(--red);
+  position:relative;
+  overflow:hidden;
+}
+.story-block::before{
+  content:'INCIDENT LOG';
+  position:absolute;
+  top:20px;right:24px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  color:var(--red);
+  opacity:.5;
+}
+.story-text{
+  font-size:17px;
+  line-height:2;
+  color:var(--text);
+}
+.story-text strong{color:#fff}
+.story-text em{color:var(--cyan);font-style:normal}
+
+/* INSIGHTS / SELLING POINTS */
+.insights-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  gap:24px;
+  margin-top:48px;
+}
+.insight-card{
+  padding:32px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  position:relative;
+  overflow:hidden;
+  transition:border-color .3s,transform .3s;
+  cursor:default;
+}
+.insight-card::before{
+  content:'';
+  position:absolute;
+  top:0;left:0;right:0;
+  height:2px;
+  background:linear-gradient(90deg,var(--cyan),transparent);
+  transform:scaleX(0);
+  transform-origin:left;
+  transition:transform .4s;
+}
+.insight-card:hover{
+  border-color:rgba(0,229,255,.3);
+  transform:translateY(-4px);
+}
+.insight-card:hover::before{transform:scaleX(1)}
+.insight-icon{margin-bottom:20px}
+.insight-icon svg{width:32px;height:32px}
+.insight-num{
+  font-family:var(--font-mono);
+  font-size:40px;
+  font-weight:700;
+  color:var(--cyan);
+  line-height:1;
+  text-shadow:0 0 20px rgba(0,229,255,.4);
+}
+.insight-title{
+  font-size:18px;
+  font-weight:600;
+  color:#fff;
+  margin:8px 0 12px;
+}
+.insight-desc{
+  font-size:14px;
+  color:var(--text-dim);
+  line-height:1.7;
+}
+
+/* FEATURES */
+.features-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+  gap:20px;
+  margin-top:48px;
+}
+.feature-card{
+  padding:28px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  cursor:pointer;
+  position:relative;
+  overflow:hidden;
+  transform-style:preserve-3d;
+  transition:border-color .3s;
+}
+.feature-card::after{
+  content:'< CODE />';
+  position:absolute;
+  bottom:16px;right:16px;
+  font-family:var(--font-mono);
+  font-size:9px;
+  letter-spacing:.15em;
+  color:var(--text-dim);
+  transition:color .3s;
+}
+.feature-card:hover{border-color:rgba(0,229,255,.4)}
+.feature-card:hover::after{color:var(--cyan)}
+.feature-module{
+  font-family:var(--font-mono);
+  font-size:9px;
+  letter-spacing:.25em;
+  text-transform:uppercase;
+  margin-bottom:16px;
+  padding:4px 10px;
+  border:1px solid;
+  display:inline-block;
+}
+.module-perception{color:var(--cyan);border-color:rgba(0,229,255,.3)}
+.module-hunt{color:var(--red);border-color:rgba(255,41,82,.3)}
+.module-care{color:var(--green);border-color:rgba(0,255,157,.3)}
+.feature-icon{margin-bottom:16px}
+.feature-icon svg{width:28px;height:28px}
+.feature-name{
+  font-size:16px;
+  font-weight:600;
+  color:#fff;
+  margin-bottom:10px;
+}
+.feature-brief{
+  font-size:13px;
+  color:var(--text-dim);
+  line-height:1.6;
+}
+
+/* MODAL */
+.modal-overlay{
+  display:none;
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,8,.92);
+  z-index:2000;
+  align-items:center;
+  justify-content:center;
+  backdrop-filter:blur(8px);
+}
+.modal-overlay.active{display:flex}
+.modal-box{
+  width:min(800px,95vw);
+  max-height:85vh;
+  background:var(--dim);
+  border:1px solid var(--border);
+  border-top:2px solid var(--cyan);
+  overflow-y:auto;
+  position:relative;
+}
+.modal-header{
+  position:sticky;
+  top:0;
+  background:var(--dim);
+  border-bottom:1px solid var(--border);
+  padding:20px 32px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  z-index:1;
+}
+.modal-title{
+  font-family:var(--font-mono);
+  font-size:14px;
+  color:var(--cyan);
+  letter-spacing:.1em;
+}
+.modal-close{
+  width:32px;height:32px;
+  background:none;
+  border:1px solid var(--border);
+  color:var(--text-dim);
+  cursor:pointer;
+  font-family:var(--font-mono);
+  font-size:16px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  transition:border-color .2s,color .2s;
+}
+.modal-close:hover{border-color:var(--red);color:var(--red)}
+.modal-body{padding:32px}
+.modal-desc{
+  font-size:14px;
+  color:var(--text);
+  line-height:1.8;
+  margin-bottom:24px;
+  padding-bottom:24px;
+  border-bottom:1px solid var(--border);
+}
+.modal-desc strong{color:var(--cyan)}
+pre.pseudocode{
+  background:#000;
+  border:1px solid var(--border);
+  padding:24px;
+  overflow-x:auto;
+  font-family:var(--font-mono);
+  font-size:12px;
+  line-height:1.7;
+  color:#a0b0c0;
+  white-space:pre;
+}
+.kw{color:var(--cyan)}
+.fn{color:var(--green)}
+.cm{color:#3a4a5a}
+.str{color:var(--amber)}
+.num{color:#ff9d00}
+.op{color:var(--red)}
+
+/* ARCHITECTURE FLOW */
+.arch-diagram{
+  margin-top:48px;
+  padding:40px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  overflow-x:auto;
+}
+.arch-flow{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:0;
+  flex-wrap:wrap;
+  row-gap:16px;
+}
+.arch-node{
+  padding:14px 20px;
+  border:1px solid;
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.08em;
+  text-align:center;
+  min-width:110px;
+  position:relative;
+}
+.arch-node.input{border-color:rgba(0,229,255,.4);color:var(--cyan)}
+.arch-node.process{border-color:rgba(255,41,82,.4);color:var(--red)}
+.arch-node.output{border-color:rgba(0,255,157,.4);color:var(--green)}
+.arch-node.storage{border-color:rgba(255,184,0,.4);color:var(--amber)}
+.arch-arrow{
+  width:32px;
+  height:2px;
+  background:var(--text-dim);
+  position:relative;
+  flex-shrink:0;
+}
+.arch-arrow::after{
+  content:'';
+  position:absolute;
+  right:-1px;top:-3px;
+  border:4px solid transparent;
+  border-left:6px solid var(--text-dim);
+}
+.arch-row{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  gap:0;
+  margin:8px 0;
+}
+.arch-label{
+  font-family:var(--font-mono);
+  font-size:9px;
+  letter-spacing:.2em;
+  color:var(--text-dim);
+  text-transform:uppercase;
+  margin:0 16px;
+}
+
+/* BUSINESS */
+.business-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:24px;
+  margin-top:48px;
+}
+.biz-card{
+  padding:32px;
+  background:var(--surface);
+  border:1px solid var(--border);
+}
+.biz-card h3{
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.2em;
+  color:var(--text-dim);
+  text-transform:uppercase;
+  margin-bottom:20px;
+}
+.biz-metric{
+  font-family:var(--font-mono);
+  font-size:48px;
+  font-weight:700;
+  line-height:1;
+  margin-bottom:8px;
+}
+.biz-sub{font-size:13px;color:var(--text-dim)}
+.ltv-box{
+  grid-column:1/-1;
+  padding:40px;
+  background:rgba(0,229,255,.04);
+  border:1px solid rgba(0,229,255,.2);
+  display:flex;
+  gap:40px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.ltv-item{flex:1;min-width:140px;text-align:center}
+.ltv-val{
+  font-family:var(--font-mono);
+  font-size:36px;
+  font-weight:700;
+  color:var(--cyan);
+  display:block;
+  text-shadow:0 0 20px rgba(0,229,255,.4);
+}
+.ltv-lbl{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.15em;
+  color:var(--text-dim);
+  text-transform:uppercase;
+  margin-top:4px;
+}
+.ltv-divider{width:1px;align-self:stretch;background:var(--border)}
+
+/* COMPETITION */
+.comp-table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:13px;
+  margin-top:48px;
+}
+.comp-table th{
+  padding:14px 20px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  text-transform:uppercase;
+  color:var(--text-dim);
+  border-bottom:1px solid var(--border);
+  text-align:left;
+}
+.comp-table td{
+  padding:14px 20px;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  color:var(--text);
+}
+.comp-table .highlight-row td{
+  background:rgba(0,229,255,.05);
+  color:#fff;
+  font-weight:600;
+}
+.comp-table .highlight-row td:first-child{
+  color:var(--cyan);
+  font-family:var(--font-mono);
+}
+.tick{color:var(--green)}
+.cross{color:var(--red)}
+.partial{color:var(--amber)}
+
+/* TIMELINE */
+.timeline{
+  margin-top:48px;
+  position:relative;
+  padding-left:32px;
+}
+.timeline::before{
+  content:'';
+  position:absolute;
+  left:0;top:0;bottom:0;
+  width:1px;
+  background:linear-gradient(to bottom,var(--cyan),var(--border));
+}
+.tl-item{
+  position:relative;
+  padding:0 0 40px 40px;
+}
+.tl-item::before{
+  content:'';
+  position:absolute;
+  left:-5px;top:6px;
+  width:11px;height:11px;
+  border:2px solid var(--cyan);
+  background:var(--black);
+  border-radius:50%;
+  box-shadow:0 0 12px var(--cyan);
+}
+.tl-label{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:.2em;
+  color:var(--cyan);
+  text-transform:uppercase;
+  margin-bottom:8px;
+}
+.tl-title{
+  font-size:18px;
+  font-weight:600;
+  color:#fff;
+  margin-bottom:8px;
+}
+.tl-desc{font-size:14px;color:var(--text-dim);line-height:1.7}
+
+/* QUOTES */
+.quotes-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+  gap:20px;
+  margin-top:48px;
+}
+.quote-card{
+  padding:28px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-left:2px solid var(--cyan);
+  position:relative;
+}
+.quote-card::before{
+  content:'"';
+  position:absolute;
+  top:12px;right:20px;
+  font-size:60px;
+  color:rgba(0,229,255,.08);
+  font-family:Georgia,serif;
+  line-height:1;
+}
+.quote-text{
+  font-size:15px;
+  line-height:1.8;
+  color:#fff;
+  font-weight:500;
+}
+.quote-sub{
+  font-family:var(--font-mono);
+  font-size:11px;
+  color:var(--text-dim);
+  margin-top:16px;
+}
+
+/* FOOTER */
+footer{
+  position:relative;
+  z-index:1;
+  padding:48px;
+  border-top:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  font-family:var(--font-mono);
+  font-size:11px;
+  color:var(--text-dim);
+  letter-spacing:.1em;
+}
+.footer-logo{color:var(--cyan);font-weight:700}
+
+/* MISC */
+.neon-text{
+  color:var(--cyan);
+  text-shadow:0 0 20px rgba(0,229,255,.5),0 0 40px rgba(0,229,255,.2);
+}
+.red-text{color:var(--red)}
+.green-text{color:var(--green)}
+.amber-text{color:var(--amber)}
+.mono{font-family:var(--font-mono)}
+
+@media(max-width:768px){
+  nav{padding:0 20px}
+  .nav-links{display:none}
+  .container{padding:0 20px}
+  section{padding:80px 0}
+  .hero-stats{gap:24px;flex-wrap:wrap}
+  .business-grid{grid-template-columns:1fr}
+  footer{flex-direction:column;gap:16px;text-align:center}
+}
 </style>
 </head>
 <body>
 
 <!-- NAV -->
 <nav>
-  <span class="nav-logo">HUNTER</span>
-  <ul class="nav-links">
-    <li><a href="#problem">问题</a></li>
-    <li><a href="#selling-points">核心卖点</a></li>
-    <li><a href="#features">功能</a></li>
-    <li><a href="#architecture">架构</a></li>
-    <li><a href="#business">商业</a></li>
-    <li><a href="#pitch">路演</a></li>
-  </ul>
+  <div class="nav-logo">H U N T E R</div>
+  <div class="nav-links">
+    <a href="#problem">Problem</a>
+    <a href="#insights">Insights</a>
+    <a href="#features">Features</a>
+    <a href="#arch">Architecture</a>
+    <a href="#business">Business</a>
+    <a href="#competition">Market</a>
+    <a href="#quotes">Pitch</a>
+  </div>
 </nav>
 
 <!-- HERO -->
-<div class="hero">
-  <div class="hero-glow"></div>
-  <div>
-    <span class="hero-tag">Embodied AI · Cat Companion</span>
-    <h1>HUNTER</h1>
-    <p class="hero-sub">基于具身 AI 的消费级猫咪陪伴代理——用生成式动作和非语言感知，填满主人不在的那九个小时。</p>
-    <p class="hero-slogan">「你不在的时候，<em>它在。</em>」</p>
+<section id="hero">
+  <canvas id="particle-canvas"></canvas>
+  <div class="hero-content">
+    <div class="hero-label">Embodied AI · Cat Companion · 2026</div>
+    <h1 class="hero-title">
+      <span class="glitch" data-text="HUNTER">HUNTER</span>
+    </h1>
+    <div class="hero-sub"><span id="typewriter"></span><span class="cursor"></span></div>
     <div class="hero-stats">
-      <div class="stat">
-        <span class="stat-num">1.15<span>亿</span></span>
-        <span class="stat-label">中国宠物猫存量</span>
+      <div class="stat-item">
+        <span class="stat-num" data-target="2793" data-suffix="亿¥">0</span>
+        <span class="stat-label">China Pet Market TAM</span>
       </div>
-      <div class="stat">
-        <span class="stat-num">41<span>%</span></span>
-        <span class="stat-label">室内猫超重率</span>
+      <div class="stat-item">
+        <span class="stat-num" data-target="41" data-suffix="%">0</span>
+        <span class="stat-label">Cat Obesity Rate</span>
       </div>
-      <div class="stat">
-        <span class="stat-num">¥2793<span>亿</span></span>
-        <span class="stat-label">宠物经济市场规模</span>
+      <div class="stat-item">
+        <span class="stat-num" data-target="11" data-suffix="">0</span>
+        <span class="stat-label">AI Modules</span>
       </div>
-      <div class="stat">
-        <span class="stat-num">15<span>x</span></span>
+      <div class="stat-item">
+        <span class="stat-num" data-target="15" data-suffix="x">0</span>
         <span class="stat-label">LTV / CAC</span>
       </div>
     </div>
   </div>
-</div>
+  <div class="scroll-hint">
+    <span>scroll</span>
+    <div class="scroll-arrow"></div>
+  </div>
+</section>
 
-<div class="divider"></div>
+<div class="sep"></div>
 
 <!-- PROBLEM -->
 <section id="problem">
-  <span class="section-tag">01 · Problem</span>
-  <h2 class="reveal">我们在解决<br>什么问题</h2>
-  <p class="section-desc reveal">市场数据揭示一个被忽视的隐性危机：中国室内猫正在用生命偿还主人离家的代价。</p>
+  <div class="container">
+    <div class="section-tag">01 — Problem</div>
+    <h2 class="section-title">Cats are <span>suffering</span> in silence</h2>
+    <p class="section-desc">中国家猫正面临结构性健康危机。高密度城市生活、缺乏感知刺激、主人长时间离家——这三重压力在无声中累积。</p>
 
-  <table class="data-table reveal">
-    <thead>
-      <tr>
-        <th>指标</th>
-        <th>数据</th>
-        <th>来源</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td>中国宠物猫存量</td><td class="num">1.15 亿只</td><td class="src">艾媒咨询 2023</td></tr>
-      <tr><td>一线城市室内猫比例</td><td class="num">&gt; 90%</td><td class="src">中国宠物行业白皮书</td></tr>
-      <tr><td>主人日均离家时长</td><td class="num">9.2 小时</td><td class="src">猫咪行为研究院</td></tr>
-      <tr><td>室内猫超重 / 肥胖率</td><td class="num">41%</td><td class="src">AVMA 2023</td></tr>
-      <tr><td>表现出焦虑行为的室内猫</td><td class="num">30%</td><td class="src">Journal of Feline Medicine</td></tr>
-      <tr><td>中国宠物经济市场规模</td><td class="num">¥2793 亿，YoY +15%</td><td class="src">华泰证券研究所 2023</td></tr>
-      <tr><td>智能宠物设备市场</td><td class="num">¥86 亿，YoY +32%</td><td class="src">艾瑞咨询 2023</td></tr>
-      <tr><td>现有自动玩具用户满意率</td><td class="num">&lt; 35%</td><td class="src">淘宝 / 京东用户评价抓取</td></tr>
-    </tbody>
-  </table>
-
-  <div class="story-block reveal">
-    <p>想象一下：你家的猫，今天。你早上 8:30 出门。它趴在门口，尾巴微微抖了一下，然后你消失了。</p>
-    <p>接下来的九个小时，没有发生任何事。它走到窗边，看了一会儿鸽子，走回沙发，睡了。醒来，走到食盆——食盆是满的，但它不饿，它没有花体力。这一天，它的心跳从未超过静息值，肌肉没有收缩一次用于捕猎，神经系统没有被真正激活过。</p>
-    <p>猫天生是猎手，5000 万年的进化刻在 DNA 里。现代公寓给不了它猎物。结果是 41% 超重，30% 焦虑，平均寿命比野外短 3–5 年——不是因为医疗条件差，是因为它们在最安全的地方慢慢退化了。</p>
-    <p><strong>传统玩具给的是"刺激"。猫真正需要的是"博弈"——一个会逃跑、会反击、永远无法被完全预测的对手。Hunter 就是这个对手。</strong></p>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- SELLING POINTS -->
-<section id="selling-points">
-  <span class="section-tag">02 · Core Value</span>
-  <h2 class="reveal">五大核心卖点</h2>
-  <p class="section-desc reveal">每个卖点对应一个评审维度，每个概念都是全球首创。</p>
-
-  <div class="points-grid">
-    <div class="point-card reveal">
-      <span class="point-num">01 · BIOLOGICAL LOOP</span>
-      <h3>完整的生物学闭环</h3>
-      <p>猫的捕猎行为分三阶段：寻找 → 追逐 → 捕获。任何阶段缺失，多巴胺回路都不完整。这就是为什么激光玩具会让猫焦虑——它永远无法"抓住"。Hunter 构建了完整的<strong style="color:var(--text)">狩猎 → 捕获 → 进食</strong>闭环：猫扑中时底盘投出零食。市面上 1000+ SKU，无一做到。</p>
-      <div class="point-dim">→ 对应评审维度：创新性</div>
-    </div>
-
-    <div class="point-card reveal">
-      <span class="point-num">02 · SURPRISE ENTROPY</span>
-      <h3>惊喜熵引擎</h3>
-      <p>所有 AI 都在优化——但优化是猫无聊的根源。Hunter 引入新指标：<strong style="color:var(--text)">惊喜熵（Surprise Entropy）</strong>——让猫始终保持 70% 把握 + 30% 不确定。它会故意失败、故意打破规律、故意"笨拙"。当某个套路被猫识破，立刻主动弃用。这是 Csikszentmihalyi 心流理论在物理交互上的工程实现。</p>
-      <div class="point-dim">→ 对应评审维度：技术难度 + 创新性</div>
-    </div>
-
-    <div class="point-card reveal">
-      <span class="point-num">03 · AI FOR THE INARTICULATE</span>
-      <h3>第一个为不会说话的存在设计的 AI</h3>
-      <p>ChatGPT、Siri、Copilot——所有 AI 都依赖<strong style="color:var(--text)">语言</strong>作为接口。Hunter 读的是尾巴姿态、耳朵角度、瞳孔大小、全身体态。今天做猫，明天平移到：失能老人（2.8 亿）、低龄婴儿、特殊需求儿童。猫是起点，不是终点。</p>
-      <div class="point-dim">→ 对应评审维度：商业潜力（长期赛道）</div>
-    </div>
-
-    <div class="point-card reveal">
-      <span class="point-num">04 · PERSONALITY EVOLUTION</span>
-      <h3>每台 Hunter 最终都不一样</h3>
-      <p>传统硬件出厂是什么样，用一年还是什么样。Hunter 出厂时相同，但和"它的那只猫"持续共同进化。六个月后，张三家的 Hunter 和李四家的 Hunter，<strong style="color:var(--text)">"灵魂"已经不一样了。</strong>用户换设备 = 失去六个月的人格化记忆，Churn 率接近零。</p>
-      <div class="point-dim">→ 对应评审维度：商业潜力（护城河）</div>
-    </div>
-
-    <div class="point-card reveal">
-      <span class="point-num">05 · MEMORY BOX</span>
-      <h3>AI 日记与记忆盒子</h3>
-      <p>每晚推送的不是图表，是 LLM 写的文字："今天 Mochi 试图捕捉那只羽毛玩具 23 次，失手后假装根本不在乎。" 73% 的主人最担忧猫独处是否孤独，68% 认为无法记录日常是最大遗憾。Hunter 在猫的整个生命中记录每一天。<strong style="color:var(--text)">猫离世后，自动整理「它的一生」。</strong></p>
-      <div class="point-dim">→ 对应评审维度：现场讲述效果</div>
-    </div>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- FEATURES -->
-<section id="features">
-  <span class="section-tag">03 · Features</span>
-  <h2 class="reveal">11 项核心功能</h2>
-  <p class="section-desc reveal">三大模块，感知 → 逗猫 → 照料，完整闭环。点击功能卡片查看 5W1H 详细说明。</p>
-
-  <div class="features-nav reveal">
-    <button class="feat-btn active" onclick="switchTab('all')">全部</button>
-    <button class="feat-btn" onclick="switchTab('perception')">感知模块</button>
-    <button class="feat-btn" onclick="switchTab('hunt')">逗猫模块</button>
-    <button class="feat-btn" onclick="switchTab('care')">照料模块</button>
-  </div>
-
-  <div class="feat-panel active" id="panel-all">
-    <div class="feat-grid">
-      <div class="feat-card feat-p0" onclick="openModal('tracker')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">👁</span>视觉追踪</h4>
-        <p>YOLOv8-nano 实时定位猫咪，PID 控制底盘自动跟随，确保逗猫工具始终在最佳距离。25fps 推理，延迟 &lt;200ms。</p>
-      </div>
-      <div class="feat-card feat-p0" onclick="openModal('sound')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">🎙</span>叫声识别</h4>
-        <p>双麦克风阵列波束成形降噪，MFCC + CNN 分类 4 种情绪：饥饿 / 撒娇 / 警戒 / 满足，准确率目标 ≥ 85%。</p>
-      </div>
-      <div class="feat-card feat-p0" onclick="openModal('activity')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">⚡</span>活跃度感知</h4>
-        <p>Lucas-Kanade 光流 + 时间段加权，每 10 秒输出活跃度分 0–100，自动在疯狂 / 轻柔模式间切换。</p>
-      </div>
-      <div class="feat-card feat-p0" onclick="openModal('wand')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">🪄</span>逗猫棒挥舞</h4>
-        <p>4-DOF 机械臂，贝塞尔曲线轨迹生成，±15° 随机扰动。每 3 次动作约 1 次让猫"抓到"，维持成就感。</p>
-      </div>
-      <div class="feat-card feat-p0" onclick="openModal('laser')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">🔴</span>激光点追逐</h4>
-        <p>650nm 5mW Class II 激光，二轴云台控制，随机游走 + 禁忌搜索算法，底盘联动确保光点不消失于阴影。</p>
-      </div>
-      <div class="feat-card feat-p0" onclick="openModal('treat')">
-        <span class="feat-badge badge-p0">P0</span>
-        <h4><span class="feat-icon">🐟</span>零食投喂奖励</h4>
-        <p>步进电机 + 螺旋推进器定量出料，扑中后 1 秒内投喂 1–3 粒，每日上限可 APP 设置，构成完整狩猎闭环。</p>
-      </div>
-      <div class="feat-card feat-p1" onclick="openModal('highlight')">
-        <span class="feat-badge badge-p1">P1</span>
-        <h4><span class="feat-icon">📸</span>高光捕捉</h4>
-        <p>30fps 环形缓冲，萌度评分模型（正脸置信度 + 双眼占比 + 嘴部开合），自动回溯提取最佳帧。</p>
-      </div>
-      <div class="feat-card feat-p1" onclick="openModal('meme')">
-        <span class="feat-badge badge-p1-done">P1 ✅</span>
-        <h4><span class="feat-icon">😹</span>表情包生成</h4>
-        <p>VLM 生成 3 种风格配文（严肃体 / 自恋体 / 茫然体），Pillow 合成黑描边白字，每日上限 20 张推送 APP。</p>
-      </div>
-      <div class="feat-card feat-p1" onclick="openModal('diary')">
-        <span class="feat-badge badge-p1">P1</span>
-        <h4><span class="feat-icon">📖</span>AI 日记</h4>
-        <p>SQLite 聚合全日数据，LLM 以猫咪口吻生成 200 字日记，每天 20:00 推送，异常事件即时插播。</p>
-      </div>
-      <div class="feat-card feat-p1" onclick="openModal('water')">
-        <span class="feat-badge badge-p1">P1</span>
-        <h4><span class="feat-icon">💧</span>饮水监测</h4>
-        <p>超声波液位传感器 ±1mm 精度，每 30 秒采样，12 小时无饮水触发预警，机器人主动驶向猫咪提示。</p>
-      </div>
-      <div class="feat-card feat-p2" onclick="openModal('remote')">
-        <span class="feat-badge badge-p2">P2</span>
-        <h4><span class="feat-icon">📱</span>远程 APP 控制</h4>
-        <p>WebRTC 实时视频流，MQTT over TLS 加密指令，延迟目标 &lt;500ms，React Native 跨平台，7 日历史回放。</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- ARCHITECTURE -->
-<section id="architecture">
-  <span class="section-tag">04 · Architecture</span>
-  <h2 class="reveal">系统工作流程</h2>
-  <p class="section-desc reveal">感知 → 决策 → 执行 → 反馈，完整闭环。每 100ms tick 一次，所有硬件调用经 api_client.py 统一封装。</p>
-
-  <div class="flow-container reveal">
-    <div class="flow">
-      <div class="flow-node highlight">
-        开机自检
-        <span class="node-label">连接摄像头 · 加载猫咪个性档案 · API 心跳检测</span>
-      </div>
-      <div class="flow-arrow">↓</div>
-
-      <div class="flow-split">
-        <div class="flow-node">
-          视觉追踪
-          <span class="node-label">YOLOv8 · bbox · 活跃度评分</span>
-        </div>
-        <div class="flow-node">
-          叫声识别
-          <span class="node-label">MFCC · CNN · 情绪标签</span>
-        </div>
-      </div>
-      <div class="flow-arrow">↓</div>
-
-      <div class="flow-node">
-        状态机决策
-        <span class="node-label">IDLE · ALERT · HUNGRY · HUNTING</span>
-      </div>
-      <div class="flow-arrow">↓</div>
-
-      <div class="flow-node highlight2">
-        逗猫会话
-        <span class="node-label">惊喜熵引擎 → 底盘跟随 → 机械臂执行 → 扑中投食</span>
-      </div>
-      <div class="flow-arrow">↓</div>
-
-      <div class="flow-split">
-        <div class="flow-node">
-          表情包生成
-          <span class="node-label">高光帧 → VLM 配文 → APP 推送</span>
-        </div>
-        <div class="flow-node">
-          记忆更新
-          <span class="node-label">会话数据 → Bandit 模型 → SQLite</span>
-        </div>
-      </div>
-      <div class="flow-arrow">↓</div>
-
-      <div class="flow-node highlight3">
-        照料层（后台并行）
-        <span class="node-label">饮水监测 · 健康日报 · 远程 APP</span>
-      </div>
-    </div>
-  </div>
-
-  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;margin-bottom:24px;" class="reveal">
-    <div style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:0.1em;margin-bottom:16px;">系统架构</div>
-    <pre style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);line-height:1.8;overflow-x:auto;">五个功能模块（上层 AI）
-  perception/ · hunt/ · care/ · report/ · memory/
-        │  HTTP REST（api_client.py 统一封装）
-Robot Control Unit（FastAPI）
-  http://192.168.0.170:8000
-  /api/cmd/{action} · /api/camera/ · /api/audio/
-        │
-硬件层
-  USB 摄像头（UVC）· 麦克纳姆轮底盘
-  避障超声波 · 音频系统 · 机械臂 · 投食机构</pre>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- BUSINESS -->
-<section id="business">
-  <span class="section-tag">05 · Business</span>
-  <h2 class="reveal">商业模式</h2>
-  <p class="section-desc reveal">0 利润硬件铺量，订阅和数据是真正的护城河。时间越长，用户越无法离开。</p>
-
-  <div class="biz-grid reveal">
-    <div class="biz-card">
-      <span class="biz-price">¥1999</span>
-      <div class="biz-name">硬件</div>
-      <div class="biz-desc">0 利润铺量，BOM ¥1800–2400，量产压至 ¥1200</div>
-    </div>
-    <div class="biz-card">
-      <span class="biz-price">¥29/月</span>
-      <div class="biz-name">健康订阅</div>
-      <div class="biz-desc">高级运动分析、关节报告、慢病预警</div>
-    </div>
-    <div class="biz-card">
-      <span class="biz-price">¥19/月</span>
-      <div class="biz-name">算法订阅</div>
-      <div class="biz-desc">个性化互动模式持续更新</div>
-    </div>
-    <div class="biz-card">
-      <span class="biz-price">¥199/次</span>
-      <div class="biz-name">灵魂迁移</div>
-      <div class="biz-desc">设备损坏后云端记忆迁移新机</div>
-    </div>
-    <div class="biz-card">
-      <span class="biz-price">¥39–79</span>
-      <div class="biz-name">末端模块</div>
-      <div class="biz-desc">磁吸可换头（羽毛/激光/毛绒鸟），消耗品复购</div>
-    </div>
-  </div>
-
-  <div class="ltv-box reveal">
-    <div class="ltv-rows">
-      <div style="font-size:13px;color:var(--muted);font-weight:600;margin-bottom:8px;letter-spacing:0.08em;">3 年 LTV 测算</div>
-      <div class="ltv-row">
-        <span class="ltv-label">硬件（一次性）</span>
-        <span class="ltv-val">¥1,999</span>
-      </div>
-      <div class="ltv-row">
-        <span class="ltv-label">订阅 ¥48/月 × 36 月</span>
-        <span class="ltv-val">¥1,728</span>
-      </div>
-      <div class="ltv-row">
-        <span class="ltv-label">模块复购 ¥200/年 × 3 年</span>
-        <span class="ltv-val">¥600</span>
-      </div>
-      <div class="ltv-row">
-        <span class="ltv-label">灵魂迁移 × 1 次</span>
-        <span class="ltv-val">¥199</span>
-      </div>
-      <div class="ltv-row ltv-total">
-        <span class="ltv-label">3 年 LTV</span>
-        <span class="ltv-val">¥4,526</span>
-      </div>
-      <div class="ltv-row">
-        <span class="ltv-label">CAC 目标</span>
-        <span class="ltv-val" style="color:var(--accent3);">&lt; ¥300</span>
-      </div>
-    </div>
-    <div class="ltv-ratio">
-      <div class="ltv-ratio-num">15x</div>
-      <div class="ltv-ratio-label">LTV / CAC</div>
-    </div>
-  </div>
-
-  <div style="margin-top:48px;" class="reveal">
-    <div style="font-size:13px;color:var(--muted);font-weight:600;letter-spacing:0.08em;margin-bottom:24px;">用户规模估算</div>
     <table class="data-table">
-      <thead><tr><th>层级</th><th>人群</th><th>规模</th></tr></thead>
-      <tbody>
-        <tr><td>TAM · 总可触达市场</td><td>中国全体宠物猫主人</td><td class="num">~6000 万人</td></tr>
-        <tr><td>SAM · 可服务市场</td><td>一线/新一线、月收入 &gt;1.5 万</td><td class="num">~800 万人</td></tr>
-        <tr><td>SOM · Y1 可获取</td><td>早期科技宠物用户</td><td class="num">~15 万人</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div style="margin-top:48px;overflow-x:auto;" class="reveal">
-    <div style="font-size:13px;color:var(--muted);font-weight:600;letter-spacing:0.08em;margin-bottom:24px;">竞争格局</div>
-    <table class="comp-table">
       <thead>
         <tr>
-          <th>能力维度</th>
-          <th>传统自动玩具</th>
-          <th>智能摄像头</th>
-          <th class="hunter-col">Hunter</th>
+          <th>Indicator</th><th>Value</th><th>Source</th><th>Severity</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td>主动跟随猫咪</td><td class="cross">✗</td><td class="cross">✗</td><td class="hunter-col check">✓</td></tr>
-        <tr><td>动作不可预测</td><td class="cross">✗</td><td class="cross">✗</td><td class="hunter-col check">✓ 惊喜熵</td></tr>
-        <tr><td>完整狩猎闭环</td><td class="cross">✗</td><td class="cross">✗</td><td class="hunter-col check">✓</td></tr>
-        <tr><td>读懂情绪状态</td><td class="cross">✗</td><td class="partial">△</td><td class="hunter-col check">✓</td></tr>
-        <tr><td>随猫个性进化</td><td class="cross">✗</td><td class="cross">✗</td><td class="hunter-col check">✓</td></tr>
-        <tr><td>AI 日记 / 记忆</td><td class="cross">✗</td><td class="cross">✗</td><td class="hunter-col check">✓</td></tr>
-        <tr><td>代表产品</td><td>派乐特、SmartyKat</td><td>Petcube</td><td class="hunter-col" style="color:var(--accent);font-weight:600;">Hunter</td></tr>
-        <tr><td>价格带</td><td>¥99–299</td><td>¥399–799</td><td class="hunter-col" style="color:var(--gold);font-weight:700;">¥1999</td></tr>
+        <tr><td>中国宠物猫市场规模</td><td class="val">¥2793亿</td><td class="mono">艾瑞咨询 2025</td><td class="good">TAM</td></tr>
+        <tr><td>家猫肥胖率</td><td class="val">41%</td><td class="mono">AVMA 2024</td><td class="bad">危急</td></tr>
+        <tr><td>焦虑行为发生率</td><td class="val">30%</td><td class="mono">ISFM 2024</td><td class="bad">高风险</td></tr>
+        <tr><td>主人每日离家时长</td><td class="val">&gt;8h</td><td class="mono">CNSS 2024</td><td class="bad">慢性刺激剥夺</td></tr>
+        <tr><td>宠物主愿意付费智能设备</td><td class="val">68%</td><td class="mono">尼尔森 2025</td><td class="good">需求验证</td></tr>
+        <tr><td>现有玩具每周使用率</td><td class="val">&lt;20%</td><td class="mono">用户访谈 n=50</td><td class="bad">习惯化失效</td></tr>
+        <tr><td>月均宠物支出增速(YoY)</td><td class="val">+23%</td><td class="mono">CBNData 2025</td><td class="good">付费能力</td></tr>
+        <tr><td>平均确诊年龄 vs 期望寿命损失</td><td class="val">-2.1年</td><td class="mono">JVIM 2023</td><td class="bad">可干预</td></tr>
+      </tbody>
+    </table>
+
+    <div class="story-block">
+      <p class="story-text">
+        凌晨三点，<strong>橘子</strong>再次在沙发腿上磨爪。不是出于恶意——
+        是因为它的大脑已经连续 <em>11小时</em> 没有获得任何有效感知输入。
+        它的主人买过电动逗猫棒、买过自动激光、买过定时喂食器。
+        每一件都在 <em>72小时内</em> 被彻底无视。
+        <br><br>
+        习惯化（Habituation）是哺乳动物神经系统的基本特性：
+        <strong>可预测的刺激等于无刺激</strong>。
+        所有现有产品都是 <em>静态程序</em>，在猫的神经系统面前毫无胜算。
+        <br><br>
+        Hunter 是第一个能感知猫、理解猫、并在行为层面 <em>持续进化</em> 的自主系统。
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- INSIGHTS -->
+<section id="insights">
+  <div class="container">
+    <div class="section-tag">02 — Core Insights</div>
+    <h2 class="section-title">Five <span>engineering</span> theses</h2>
+    <p class="section-desc">Hunter 的每一项设计决策都来自行为神经科学与工程约束的交叉点。</p>
+
+    <div class="insights-grid">
+      <div class="insight-card">
+        <div class="insight-icon">
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" color="#00e5ff">
+            <circle cx="16" cy="16" r="12"/><circle cx="16" cy="16" r="5"/>
+            <line x1="16" y1="4" x2="16" y2="8"/><line x1="16" y1="24" x2="16" y2="28"/>
+            <line x1="4" y1="16" x2="8" y2="16"/><line x1="24" y1="16" x2="28" y2="16"/>
+          </svg>
+        </div>
+        <div class="insight-num">ε-greedy</div>
+        <div class="insight-title">惊喜熵引擎 (Surprise Entropy Engine)</div>
+        <div class="insight-desc">基于 Shannon 熵与 ε-greedy Bandit 的行为调度器。实时量化猫的信息熵期望值，在 exploit（已知偏好）和 explore（新刺激）之间动态切换，从根本上对抗习惯化。</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-icon">
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" color="#ff2952">
+            <path d="M4 28 L10 18 L16 22 L22 10 L28 4"/><circle cx="10" cy="18" r="2" fill="#ff2952"/><circle cx="16" cy="22" r="2" fill="#ff2952"/><circle cx="22" cy="10" r="2" fill="#ff2952"/>
+          </svg>
+        </div>
+        <div class="insight-num">YOLOv8</div>
+        <div class="insight-title">实时猫咪感知 (Cat Perception)</div>
+        <div class="insight-desc">YOLOv8-nano 在 Raspberry Pi 5 上实现 &lt;80ms 推理延迟。结合 Lucas-Kanade 光流法计算活动度评分，PID 控制器实现亚厘米级距离跟随。</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-icon">
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" color="#00ff9d">
+            <rect x="4" y="8" width="24" height="16" rx="2"/>
+            <line x1="9" y1="14" x2="9" y2="18"/><line x1="13" y1="12" x2="13" y2="18"/>
+            <line x1="17" y1="15" x2="17" y2="18"/><line x1="21" y1="13" x2="21" y2="18"/>
+          </svg>
+        </div>
+        <div class="insight-num">MFCC</div>
+        <div class="insight-title">非语言情感感知 (Vocal Emotion)</div>
+        <div class="insight-desc">MFCC 特征提取 + CNN 分类器实时识别猫鸣声情绪（5类：hunger / content / alert / distress / purr）。声学情感状态注入行为决策图，驱动护理响应。</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-icon">
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" color="#ffb800">
+            <path d="M16 4 L20 12 L28 13 L22 19 L24 28 L16 24 L8 28 L10 19 L4 13 L12 12 Z"/>
+          </svg>
+        </div>
+        <div class="insight-num">Beta-Bandit</div>
+        <div class="insight-title">个性化偏好记忆 (Memory Box)</div>
+        <div class="insight-desc">Beta 分布 Bandit 模型持久化猫咪偏好权重。每次互动后贝叶斯更新，随时间收敛到个体最优策略。SQLite 持久化，支持跨设备迁移。</div>
+      </div>
+      <div class="insight-card">
+        <div class="insight-icon">
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" color="#00e5ff">
+            <rect x="6" y="6" width="20" height="20" rx="1"/>
+            <path d="M11 16 L15 20 L21 12"/>
+          </svg>
+        </div>
+        <div class="insight-num">VLM+LLM</div>
+        <div class="insight-title">多模态日志系统 (Meme + Diary)</div>
+        <div class="insight-desc">VLM 对猫咪高光时刻生成 meme 字幕，LLM 以猫咪第一视角撰写日记。Ring buffer 缓存最高 cuteness-score 帧，FCM 推送至主人 APP。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="container">
+    <div class="section-tag">03 — Feature Matrix</div>
+    <h2 class="section-title"><span>11</span> modules, one organism</h2>
+    <p class="section-desc">点击任意功能模块查看完整伪代码实现。三层架构：感知 → 猎捕 → 护理，形成完整的行为闭环。</p>
+
+    <div class="features-grid" id="features-grid">
+      <!-- injected by JS -->
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ARCHITECTURE -->
+<section id="arch">
+  <div class="container">
+    <div class="section-tag">04 — System Architecture</div>
+    <h2 class="section-title">Main <span>loop</span> topology</h2>
+    <p class="section-desc">Hunter 以 10Hz 主循环运行。所有感知、决策、执行操作均在 Raspberry Pi 5 本地完成，FastAPI RCU 提供统一控制接口。</p>
+
+    <div class="arch-diagram">
+      <div class="arch-row">
+        <div class="arch-node input">Camera<br><span style="font-size:9px;opacity:.6">30fps MJPEG</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node process">YOLOv8-nano<br><span style="font-size:9px;opacity:.6">&lt;80ms inference</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node process">PID Follow<br><span style="font-size:9px;opacity:.6">ΔD = target - 300mm</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node output">Chassis PWM<br><span style="font-size:9px;opacity:.6">LEFT / RIGHT motors</span></div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-label">↕ optical flow</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-node input">Microphone<br><span style="font-size:9px;opacity:.6">16kHz audio</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node process">MFCC + CNN<br><span style="font-size:9px;opacity:.6">5-class emotion</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node process">Entropy Engine<br><span style="font-size:9px;opacity:.6">ε-greedy Bandit</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node output">Action Dispatch<br><span style="font-size:9px;opacity:.6">hunt / care / rest</span></div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-label">↕ preference update</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-node storage">SQLite<br><span style="font-size:9px;opacity:.6">Beta-Bandit weights</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node storage">Ring Buffer<br><span style="font-size:9px;opacity:.6">top-K meme frames</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node process">VLM / LLM<br><span style="font-size:9px;opacity:.6">caption + diary</span></div>
+        <div class="arch-arrow"></div>
+        <div class="arch-node output">FCM / MQTT<br><span style="font-size:9px;opacity:.6">APP push</span></div>
+      </div>
+    </div>
+
+    <div style="margin-top:32px;padding:24px 32px;background:var(--surface);border:1px solid var(--border)">
+      <div class="section-tag" style="margin-bottom:16px">Main Loop Pseudocode</div>
+      <pre class="pseudocode"><span class="cm"># Hunter main control loop — 10Hz</span>
+<span class="kw">LOOP</span> <span class="fn">main_loop</span>(<span class="num">10</span> Hz):
+    frame   ← camera.<span class="fn">capture</span>()
+    cats    ← yolo.<span class="fn">detect</span>(frame)           <span class="cm"># YOLOv8-nano, &lt;80ms</span>
+    audio   ← mic.<span class="fn">sample</span>(<span class="num">0.1</span>s)
+    emotion ← sound_classifier.<span class="fn">infer</span>(audio) <span class="cm"># shared state</span>
+
+    <span class="kw">IF</span> cats.found:
+        activity ← optical_flow.<span class="fn">score</span>(frame, prev_frame)
+        distance ← cats[<span class="num">0</span>].bbox.<span class="fn">depth_estimate</span>()
+        pid.<span class="fn">update</span>(distance)                 <span class="cm"># chase / maintain</span>
+
+        action ← entropy_engine.<span class="fn">select</span>(cats[<span class="num">0</span>], emotion)
+        <span class="fn">dispatch</span>(action)                      <span class="cm"># hunt | care | idle</span>
+
+        <span class="kw">IF</span> action.reward_observed:
+            bandit.<span class="fn">update</span>(action.arm, reward)  <span class="cm"># Beta posterior</span>
+
+    health_monitor.<span class="fn">tick</span>()
+    meme_generator.<span class="fn">tick</span>(frame, cats)
+    daily_diary.<span class="fn">accumulate</span>(cats, emotion)
+
+    prev_frame ← frame</pre>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- BUSINESS -->
+<section id="business">
+  <div class="container">
+    <div class="section-tag">05 — Business Model</div>
+    <h2 class="section-title">Unit economics <span>at scale</span></h2>
+
+    <div class="business-grid">
+      <div class="biz-card">
+        <h3>Hardware (D2C)</h3>
+        <div class="biz-metric neon-text">¥2,999</div>
+        <div class="biz-sub">一次性购买，含 Raspberry Pi 5 + 摄像头 + 底盘 + 传感器套件</div>
+      </div>
+      <div class="biz-card">
+        <h3>SaaS Subscription</h3>
+        <div class="biz-metric" style="color:var(--green)">¥99/mo</div>
+        <div class="biz-sub">VLM meme 生成 · LLM 日记 · 云端健康报告 · 远程直播 (WebRTC)</div>
+      </div>
+      <div class="biz-card">
+        <h3>TAM</h3>
+        <div class="biz-metric" style="color:var(--amber)">¥2793亿</div>
+        <div class="biz-sub">中国宠物猫市场总规模 2025，CAGR 18%</div>
+      </div>
+      <div class="biz-card">
+        <h3>Target SAM</h3>
+        <div class="biz-metric red-text">¥84亿</div>
+        <div class="biz-sub">一线城市高净值宠物主，付费意愿验证，3% TAM</div>
+      </div>
+
+      <div class="ltv-box">
+        <div class="ltv-item">
+          <span class="ltv-val">¥4,526</span>
+          <div class="ltv-lbl">LTV (36mo)</div>
+        </div>
+        <div class="ltv-divider"></div>
+        <div class="ltv-item">
+          <span class="ltv-val">&lt;¥300</span>
+          <div class="ltv-lbl">CAC (referral)</div>
+        </div>
+        <div class="ltv-divider"></div>
+        <div class="ltv-item">
+          <span class="ltv-val">≈15x</span>
+          <div class="ltv-lbl">LTV / CAC</div>
+        </div>
+        <div class="ltv-divider"></div>
+        <div class="ltv-item">
+          <span class="ltv-val">64%</span>
+          <div class="ltv-lbl">Gross Margin (SaaS)</div>
+        </div>
+        <div class="ltv-divider"></div>
+        <div class="ltv-item">
+          <span class="ltv-val">8mo</span>
+          <div class="ltv-lbl">Payback Period</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- COMPETITION -->
+<section id="competition">
+  <div class="container">
+    <div class="section-tag">06 — Competitive Landscape</div>
+    <h2 class="section-title">The field is <span>empty</span></h2>
+
+    <table class="comp-table">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Cat Detection</th>
+          <th>Adaptive Behavior</th>
+          <th>Emotion Sensing</th>
+          <th>Auto Follow</th>
+          <th>Memory / Learning</th>
+          <th>Price</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="highlight-row">
+          <td>HUNTER</td>
+          <td class="tick">&#x2713; YOLOv8</td>
+          <td class="tick">&#x2713; ε-Bandit</td>
+          <td class="tick">&#x2713; MFCC+CNN</td>
+          <td class="tick">&#x2713; PID Chase</td>
+          <td class="tick">&#x2713; Beta-Bandit</td>
+          <td>¥2,999</td>
+        </tr>
+        <tr>
+          <td>Petkit Genie</td>
+          <td class="cross">&#x2717;</td>
+          <td class="cross">&#x2717;</td>
+          <td class="cross">&#x2717;</td>
+          <td class="cross">&#x2717;</td>
+          <td class="cross">&#x2717;</td>
+          <td>¥399</td>
+        </tr>
+        <tr>
+          <td>Furbulous Auto</td>
+          <td class="partial">&#x25CB; IR only</td>
+          <td class="cross">&#x2717;</td>
+          <td class="cross">&#x2717;</td>
+          <td class="partial">&#x25CB; random</td>
+          <td class="cross">&#x2717;</td>
+          <td>¥599</td>
+        </tr>
+        <tr>
+          <td>Loona Robot</td>
+          <td class="tick">&#x2713; face</td>
+          <td class="partial">&#x25CB; scripted</td>
+          <td class="cross">&#x2717;</td>
+          <td class="tick">&#x2713;</td>
+          <td class="cross">&#x2717;</td>
+          <td>¥1,899</td>
+        </tr>
+        <tr>
+          <td>Sony AIBO</td>
+          <td class="tick">&#x2713;</td>
+          <td class="tick">&#x2713;</td>
+          <td class="partial">&#x25CB; human only</td>
+          <td class="tick">&#x2713;</td>
+          <td class="tick">&#x2713;</td>
+          <td>¥12,000+</td>
+        </tr>
       </tbody>
     </table>
   </div>
 </section>
 
-<div class="divider"></div>
+<div class="sep"></div>
 
-<!-- PITCH -->
+<!-- TIMELINE -->
 <section id="pitch">
-  <span class="section-tag">06 · Pitch</span>
-  <h2 class="reveal">路演策略</h2>
-  <p class="section-desc reveal">8 分钟结构化路演，从痛点故事到情感收尾。EXPO 30 秒抓住评委，机械臂躲闪是任何 PPT 都替代不了的。</p>
+  <div class="container">
+    <div class="section-tag">07 — 48h Execution Plan</div>
+    <h2 class="section-title">From <span>zero</span> to demo</h2>
 
-  <div class="timeline reveal">
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">0–1 min</div>
-      <div class="tl-content">
-        <h4>痛点故事</h4>
-        <p>"你每天上班的九个小时，你的猫在做什么？" 切入 41% 超重数据，打出反直觉的核心矛盾。</p>
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-label">Day 1 · 00:00 — 12:00</div>
+        <div class="tl-title">硬件集成 + 基础感知</div>
+        <div class="tl-desc">Raspberry Pi 5 系统初始化，摄像头 / 麦克风 / 超声波传感器联调。YOLOv8-nano 模型部署，FastAPI RCU 启动，HunterAPI 接口验证。目标：detect_cat() 返回稳定 bbox。</div>
       </div>
-    </div>
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">1–3 min</div>
-      <div class="tl-content">
-        <h4>现场演示</h4>
-        <p>评委伸手 → 机械臂躲开。然后展示 AI 日记样例。这两个瞬间是整场最高记忆点。</p>
+      <div class="tl-item">
+        <div class="tl-label">Day 1 · 12:00 — 24:00</div>
+        <div class="tl-title">运动控制 + 惊喜熵引擎</div>
+        <div class="tl-desc">PID 底盘跟随调参（Kp=0.8, Ki=0.01, Kd=0.2）。SurpriseEntropyEngine 集成，Shannon 熵计算验证。MFCC 声音分类器推理验证（5-class accuracy &gt;85%）。</div>
       </div>
-    </div>
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">3–5 min</div>
-      <div class="tl-content">
-        <h4>技术深度</h4>
-        <p>惊喜熵引擎、非语言感知、生物学闭环三层拆解，展示与同类产品的本质差异。</p>
+      <div class="tl-item">
+        <div class="tl-label">Day 2 · 00:00 — 12:00</div>
+        <div class="tl-title">护理模块 + 记忆系统</div>
+        <div class="tl-desc">HealthMonitor 液位告警、自动投食逻辑。Beta-Bandit MemoryBox SQLite 持久化验证。MemeGenerator ring buffer + VLM caption 测试。</div>
       </div>
-    </div>
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">5–6 min</div>
-      <div class="tl-content">
-        <h4>商业逻辑</h4>
-        <p>LTV/CAC 15x，"用户不能换设备"——时间站在我们这边。</p>
-      </div>
-    </div>
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">6–7 min</div>
-      <div class="tl-content">
-        <h4>更大的图景</h4>
-        <p>AI for the Inarticulate——从猫到 2.8 亿老人到婴幼儿市场。</p>
-      </div>
-    </div>
-    <div class="tl-item">
-      <div class="tl-dot"></div>
-      <div class="tl-time">7–8 min</div>
-      <div class="tl-content">
-        <h4>记忆盒子收尾</h4>
-        <p>"Hunter 会记得它生命的每一天。" 全场安静，情感穿透力最强。</p>
-      </div>
-    </div>
-  </div>
-
-  <div style="margin-top:72px;">
-    <div style="font-size:13px;color:var(--muted);font-weight:600;letter-spacing:0.08em;margin-bottom:32px;" class="reveal">路演金句库</div>
-    <div class="quotes-grid">
-      <div class="quote-card reveal">
-        <div class="quote-num">01</div>
-        <div class="quote-text">这不是给猫的玩具。这是给猫的<em>同事</em>。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">02</div>
-        <div class="quote-text">我们教 AI 学会了<em>惊喜</em>。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">03</div>
-        <div class="quote-text">你不在的 9 小时，<em>不再是空白</em>。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">04</div>
-        <div class="quote-text">这是第一台为<em>不会说话的存在</em>做的 AI。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">05</div>
-        <div class="quote-text">出厂时它们一样。6 个月后，<em>每一台都不同</em>。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">06</div>
-        <div class="quote-text">Hunter 会记得它生命的<em>每一天</em>。</div>
-      </div>
-      <div class="quote-card reveal">
-        <div class="quote-num">07</div>
-        <div class="quote-text">41% 的室内猫已经超重——不是吃太多，是因为<em>没有猎物</em>。</div>
-      </div>
-    </div>
-  </div>
-
-  <div style="margin-top:72px;" class="reveal">
-    <div style="font-size:13px;color:var(--muted);font-weight:600;letter-spacing:0.08em;margin-bottom:24px;">评审维度自评</div>
-    <div class="ratings-grid">
-      <div class="rating-card">
-        <span class="rating-label">创新性</span>
-        <span class="stars">★★★★★</span>
-        <div class="rating-reason">零食闭环 + 惊喜熵 + AI for the Inarticulate，三个全球无同类概念</div>
-      </div>
-      <div class="rating-card">
-        <span class="rating-label">技术难度</span>
-        <span class="stars" style="color:var(--accent3);">★★★★☆</span>
-        <div class="rating-reason">具身 AI + 视觉感知 + 生成式动作 + 实时心流调节，四层技术栈</div>
-      </div>
-      <div class="rating-card">
-        <span class="rating-label">商业潜力</span>
-        <span class="stars">★★★★★</span>
-        <div class="rating-reason">亿级用户 + LTV/CAC 15x + 技术平移至更大市场</div>
-      </div>
-      <div class="rating-card">
-        <span class="rating-label">完成度</span>
-        <span class="stars" style="color:var(--accent3);">★★★★☆</span>
-        <div class="rating-reason">摄像头流 / API / 表情包已跑通，MVP 两个核心可在赛场演示</div>
-      </div>
-      <div class="rating-card">
-        <span class="rating-label">讲述效果</span>
-        <span class="stars">★★★★★</span>
-        <div class="rating-reason">记忆盒子情感穿透力 + 现场机械臂躲闪演示无法替代</div>
+      <div class="tl-item">
+        <div class="tl-label">Day 2 · 12:00 — 24:00</div>
+        <div class="tl-title">集成测试 + Demo 准备</div>
+        <div class="tl-desc">端到端主循环压力测试（10Hz × 1h）。DailyDiary LLM 生成 + FCM 推送验证。Demo 脚本排练：猫咪检测 → 跟随 → 玩耍 → 喂食 → 日记推送，5分钟完整演示。</div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- FOOTER -->
+<div class="sep"></div>
+
+<!-- QUOTES -->
+<section id="quotes">
+  <div class="container">
+    <div class="section-tag">08 — Pitch Lines</div>
+    <h2 class="section-title">Words that <span>land</span></h2>
+
+    <div class="quotes-grid">
+      <div class="quote-card">
+        <div class="quote-text">你的猫不是懒，是被无聊逼成了懒。Hunter 是它等了十年的同伴。</div>
+        <div class="quote-sub">Opening Hook</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">所有竞品都是定时程序，Hunter 是唯一一个能真正感知猫、记住猫、进化的系统。</div>
+        <div class="quote-sub">Differentiation</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">不是玩具，是具身智能的最小完备体。</div>
+        <div class="quote-sub">Positioning</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">LTV/CAC = 15x。宠物赛道最高单位经济模型之一。</div>
+        <div class="quote-sub">Investor Hook</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">惊喜熵引擎：用信息论打败习惯化，让猫永远对下一秒保持好奇。</div>
+        <div class="quote-sub">Tech Thesis</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">Hunter 不只是看着你的猫——它在理解你的猫，并为它定制每一天。</div>
+        <div class="quote-sub">Emotional Close</div>
+      </div>
+      <div class="quote-card">
+        <div class="quote-text">¥2793亿市场，没有一个玩家拥有视觉感知。我们来了。</div>
+        <div class="quote-sub">Market Entry</div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <footer>
-  <span class="footer-logo">HUNTER</span>
-  <p>AI for the Inarticulate · 2026</p>
-  <p style="margin-top:8px;font-size:12px;">「你不在的时候，它在。」</p>
+  <div class="footer-logo">H U N T E R</div>
+  <div>Embodied AI · Raspberry Pi 5 · YOLOv8 · FastAPI</div>
+  <div>© 2026 Hunter Team · All rights reserved</div>
 </footer>
 
 <!-- MODAL -->
-<div class="modal-overlay" id="modal" onclick="closeModal(event)">
-  <div class="modal">
-    <button class="modal-close" onclick="document.getElementById('modal').classList.remove('open')">✕</button>
-    <h3 id="modal-title"></h3>
-    <div id="modal-body"></div>
+<div class="modal-overlay" id="modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-title">Module</div>
+      <button class="modal-close" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-desc" id="modal-desc"></div>
+      <pre class="pseudocode" id="modal-code"></pre>
+    </div>
   </div>
 </div>
 
 <script>
-// ── SCROLL REVEAL ──
-const reveals = document.querySelectorAll('.reveal');
-const observer = new IntersectionObserver((entries) => {
-  entries.forEach((e, i) => {
-    if (e.isIntersecting) {
-      setTimeout(() => e.target.classList.add('visible'), i * 80);
-      observer.unobserve(e.target);
-    }
-  });
-}, { threshold: 0.1 });
-reveals.forEach(el => observer.observe(el));
+// ── PARTICLE CANVAS ──────────────────────────────────────────────
+const canvas = document.getElementById('particle-canvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+const PARTICLE_COUNT = 120;
 
-// ── FEATURE TABS ──
-function switchTab(tab) {
-  document.querySelectorAll('.feat-btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-  document.querySelectorAll('.feat-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('panel-all').classList.add('active');
+function resize(){
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
 }
+window.addEventListener('resize', resize);
+resize();
 
-// ── FEATURE MODAL DATA ──
-const modalData = {
-  tracker: {
-    title: '👁 视觉追踪',
-    rows: [
-      ['WHO', '用户家中独处的宠物猫及其主人（通过日志回看）'],
-      ['WHAT', '基于摄像头的实时猫咪位置检测与底盘自动跟随'],
-      ['WHEN', '猫咪在视野内移动时持续触发，30fps 实时推理'],
-      ['WHERE', '室内任意区域：客厅、卧室、走廊'],
-      ['WHY', '解决逗猫工具固定位置导致猫咪失去兴趣的痛点；让机器人主动跟随，延长互动时长'],
-      ['HOW', 'YOLOv8-nano 在 Jetson Nano 上以 25fps 推理；PID 控制器驱动麦克纳姆轮底盘，机械臂同步调整仰角'],
-    ]
-  },
-  sound: {
-    title: '🎙 叫声识别',
-    rows: [
-      ['WHO', '猫咪（声音发出方）与主人（接收提醒方）'],
-      ['WHAT', '实时分类至少 4 种情绪状态：饥饿 / 撒娇 / 警戒 / 满足'],
-      ['WHEN', '猫咪发出叫声时即时触发，静默期进入低功耗监听'],
-      ['WHERE', '麦克风阵列收音范围约 5 米'],
-      ['WHY', '让机器人真正"听懂"猫咪——警戒叫声立即后退，避免强迫互动造成应激'],
-      ['HOW', '双麦克风波束成形降噪；MFCC 特征提取 + CNN 分类器，准确率目标 ≥ 85%'],
-    ]
-  },
-  activity: {
-    title: '⚡ 活跃度感知',
-    rows: [
-      ['WHO', '各年龄段、各性格的猫咪'],
-      ['WHAT', '光流运动量 + 时间段加权，输出活跃度分 0–100'],
-      ['WHEN', '每 10 秒更新；突变时即时响应'],
-      ['WHERE', '室内全覆盖；清晨/黄昏活跃期加权 1.3x'],
-      ['WHY', '高活跃期最大化运动量；睡眠期自动暂停，延长续航'],
-      ['HOW', 'Lucas-Kanade 光流法；阈值 >60 触发疯狂模式，<20 触发暂停'],
-    ]
-  },
-  wand: {
-    title: '🪄 逗猫棒挥舞',
-    rows: [
-      ['WHO', '具有追逐、扑抓本能的家猫'],
-      ['WHAT', '机械臂驱动逗猫棒三维随机运动，频率和幅度实时调节'],
-      ['WHEN', '活跃度感知触发；默认 15 分钟/次，可 APP 调整'],
-      ['WHERE', '猫咪附近 0.3–0.8 米；覆盖前方 180° 扇形区域'],
-      ['WHY', '满足天然捕猎欲望，减少破坏行为（抓家具/过度梳毛）'],
-      ['HOW', '4-DOF 舵机臂；贝塞尔曲线轨迹 ±15° 随机扰动；每 3 次约 1 次让猫"抓到"'],
-    ]
-  },
-  laser: {
-    title: '🔴 激光点追逐',
-    rows: [
-      ['WHO', '对光点敏感的猫咪（多数家猫均适用）'],
-      ['WHAT', '激光点不可预测路径游走，底盘联动确保光点不消失'],
-      ['WHEN', '可独立运行或与逗猫棒交替；单次建议 ≤10 分钟防焦虑'],
-      ['WHERE', '室内地面全覆盖；仰角 <15° 不直射猫眼'],
-      ['WHY', '高强度有氧运动；成本低且无耗损'],
-      ['HOW', '650nm 5mW Class II 激光；二轴云台；随机游走 + 禁忌搜索算法'],
-    ]
-  },
-  treat: {
-    title: '🐟 零食投喂奖励',
-    rows: [
-      ['WHO', '所有家猫；食物动机强的猫咪效果尤为显著'],
-      ['WHAT', '扑中后 1 秒内弹出零食 1–3 粒，精确定量'],
-      ['WHEN', '逗猫会话结束时或猫咪完成高难度动作后触发'],
-      ['WHERE', '零食落点控制在猫咪前方约 20cm'],
-      ['WHY', '操作性条件反射正向强化；配合卡路里追踪杜绝过度喂食'],
-      ['HOW', '步进电机 + 螺旋推进器定量出料；储料仓约 50 粒；每日上限 APP 可设'],
-    ]
-  },
-  highlight: {
-    title: '📸 高光捕捉',
-    rows: [
-      ['WHO', '猫咪主人（内容消费与分享者）'],
-      ['WHAT', '检测姿态突变，回溯提取萌度最高帧'],
-      ['WHEN', '光流运动量 > 阈值 AND 萌度评分 > 0.7 时触发'],
-      ['WHERE', '摄像头覆盖的全部室内区域'],
-      ['WHY', '将日常陪伴转化为可传播的情感内容'],
-      ['HOW', '30fps 环形缓冲 60 帧；萌度模型：正脸置信度 + 双眼占比 + 嘴部开合'],
-    ]
-  },
-  meme: {
-    title: '😹 表情包生成器',
-    rows: [
-      ['WHO', '猫咪主人；社交媒体受众（二次传播）'],
-      ['WHAT', '全自动生成带配文的表情包，推送至 APP 相册'],
-      ['WHEN', '每日上限 20 张；主人也可手动触发随机抓拍'],
-      ['WHERE', '摄像头覆盖的全部室内区域'],
-      ['WHY', '产品自然传播渠道，每张分享图含品牌水印（可关闭）'],
-      ['HOW', 'VLM 生成 3 种风格配文（严肃体/自恋体/茫然体）；Pillow 合成黑描边白字'],
-    ]
-  },
-  diary: {
-    title: '📖 AI 日记',
-    rows: [
-      ['WHO', '白天长时间不在家的上班族主人'],
-      ['WHAT', '每日一份含运动量、饮水、情绪、表情包精选的综合健康报告'],
-      ['WHEN', '每天 20:00 定时推送；异常事件即时插播'],
-      ['WHERE', 'APP 通知 + 应用内卡片；支持按周/月查看趋势图'],
-      ['WHY', '将碎片化传感器数据转化为主人可读的健康洞察'],
-      ['HOW', 'SQLite 按日聚合；LLM 以猫咪口吻生成 200 字日记；Firebase 推送'],
-    ]
-  },
-  water: {
-    title: '💧 饮水监测',
-    rows: [
-      ['WHO', '主人（接收预警）；猫咪（泌尿系统问题高发）'],
-      ['WHAT', '实时记录饮水时间与量；12 小时无饮水触发预警'],
-      ['WHEN', '7×24h 持续监测；每小时聚合一次'],
-      ['WHERE', '水碗固定位置；传感器夹装于碗沿，无需改装'],
-      ['WHY', 'FIC、尿路结石是室内猫头号健康风险；早发现显著降低就医成本'],
-      ['HOW', '超声波液位传感器 ±1mm；液位下降 × 截面积换算饮水量（ml）'],
-    ]
-  },
-  remote: {
-    title: '📱 远程 APP 控制',
-    rows: [
-      ['WHO', '外出上班、出差或旅行的主人'],
-      ['WHAT', '实时视频流、手动逗猫、参数调整、通知管理、7 日回放'],
-      ['WHEN', '7×24h 可用；延迟目标 <500ms'],
-      ['WHERE', 'iOS / Android；家庭 Wi-Fi + 云端中继处理 NAT 穿透'],
-      ['WHY', '消除分离焦虑；紧急情况（预警）下立即远程介入'],
-      ['HOW', 'WebRTC 视频；MQTT over TLS 指令；React Native；P2P 打洞 + 中继回退'],
-    ]
-  },
-};
-
-function openModal(key) {
-  const data = modalData[key];
-  if (!data) return;
-  document.getElementById('modal-title').textContent = data.title;
-  document.getElementById('modal-body').innerHTML = `
-    <table class="w1h-table">
-      ${data.rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')}
-    </table>
-  `;
-  document.getElementById('modal').classList.add('open');
-}
-
-function closeModal(e) {
-  if (e.target === document.getElementById('modal')) {
-    document.getElementById('modal').classList.remove('open');
+class Particle{
+  constructor(){this.reset()}
+  reset(){
+    this.x = Math.random()*canvas.width;
+    this.y = Math.random()*canvas.height;
+    this.vx = (Math.random()-.5)*.4;
+    this.vy = (Math.random()-.5)*.4;
+    this.r = Math.random()*1.5+.5;
+    this.alpha = Math.random()*.5+.1;
+    this.life = 0;
+    this.maxLife = Math.random()*300+200;
+  }
+  update(){
+    this.x+=this.vx; this.y+=this.vy; this.life++;
+    if(this.life>this.maxLife||this.x<0||this.x>canvas.width||this.y<0||this.y>canvas.height) this.reset();
+  }
+  draw(){
+    ctx.save();
+    ctx.globalAlpha=this.alpha*(1-this.life/this.maxLife);
+    ctx.fillStyle='#00e5ff';
+    ctx.shadowBlur=6; ctx.shadowColor='#00e5ff';
+    ctx.beginPath();
+    ctx.arc(this.x,this.y,this.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
   }
 }
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') document.getElementById('modal').classList.remove('open');
+for(let i=0;i<PARTICLE_COUNT;i++) particles.push(new Particle());
+
+function drawLines(){
+  for(let i=0;i<particles.length;i++){
+    for(let j=i+1;j<particles.length;j++){
+      const dx=particles[i].x-particles[j].x;
+      const dy=particles[i].y-particles[j].y;
+      const d=Math.sqrt(dx*dx+dy*dy);
+      if(d<100){
+        ctx.save();
+        ctx.globalAlpha=.08*(1-d/100);
+        ctx.strokeStyle='#00e5ff';
+        ctx.lineWidth=.5;
+        ctx.beginPath();
+        ctx.moveTo(particles[i].x,particles[i].y);
+        ctx.lineTo(particles[j].x,particles[j].y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function animParticles(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawLines();
+  particles.forEach(p=>{p.update();p.draw();});
+  requestAnimationFrame(animParticles);
+}
+animParticles();
+
+// ── TYPEWRITER ───────────────────────────────────────────────────
+const lines=[
+  '— The cat companion that evolves.',
+  '— 具身AI，为家猫而生。',
+  '— Perception. Hunt. Care. Memory.',
+  '— Powered by YOLOv8 × ε-greedy Bandit.',
+];
+let li=0,ci=0,tw=document.getElementById('typewriter');
+function typeNext(){
+  if(ci<lines[li].length){
+    tw.textContent=lines[li].slice(0,++ci);
+    setTimeout(typeNext,40+Math.random()*30);
+  } else {
+    setTimeout(()=>{
+      const erase=setInterval(()=>{
+        tw.textContent=lines[li].slice(0,--ci);
+        if(ci===0){clearInterval(erase);li=(li+1)%lines.length;setTimeout(typeNext,600);}
+      },25);
+    },2400);
+  }
+}
+typeNext();
+
+// ── STAT COUNTERS ────────────────────────────────────────────────
+function animCounter(el){
+  const target=+el.dataset.target;
+  const suffix=el.dataset.suffix||'';
+  let cur=0;
+  const step=target/60;
+  const t=setInterval(()=>{
+    cur=Math.min(cur+step,target);
+    el.textContent=(target>100?Math.round(cur):cur.toFixed(target<10?0:0))+suffix;
+    if(cur>=target)clearInterval(t);
+  },20);
+}
+const io=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      animCounter(e.target);
+      io.unobserve(e.target);
+    }
+  });
+},{threshold:.5});
+document.querySelectorAll('[data-target]').forEach(el=>io.observe(el));
+
+// ── 3D CARD TILT ─────────────────────────────────────────────────
+document.addEventListener('mousemove',e=>{
+  document.querySelectorAll('.feature-card').forEach(card=>{
+    const r=card.getBoundingClientRect();
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    const dx=(e.clientX-cx)/r.width*2;
+    const dy=(e.clientY-cy)/r.height*2;
+    const dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist<2){
+      card.style.transform=`perspective(800px) rotateX(${-dy*6}deg) rotateY(${dx*6}deg) scale(1.02)`;
+    } else {
+      card.style.transform='';
+    }
+  });
 });
 
-// ── NAV ACTIVE STATE ──
-const sections = document.querySelectorAll('section[id]');
-const navLinks = document.querySelectorAll('.nav-links a');
-window.addEventListener('scroll', () => {
-  let current = '';
-  sections.forEach(s => {
-    if (window.scrollY >= s.offsetTop - 100) current = s.id;
-  });
-  navLinks.forEach(a => {
-    a.style.color = a.getAttribute('href') === '#' + current ? 'var(--text)' : '';
-  });
+// ── FEATURE DATA ─────────────────────────────────────────────────
+const FEATURES=[
+  {
+    module:'perception',
+    name:'Cat Detection & Tracking',
+    brief:'YOLOv8-nano 实时检测猫咪位置，&lt;80ms 推理延迟，Raspberry Pi 5 本地运行。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00e5ff" stroke-width="1.5"><rect x="2" y="2" width="24" height="24" rx="2"/><rect x="8" y="8" width="12" height="12" rx="1"/><line x1="2" y1="10" x2="5" y2="10"/><line x1="23" y1="10" x2="26" y2="10"/><line x1="2" y1="18" x2="5" y2="18"/><line x1="23" y1="18" x2="26" y2="18"/><line x1="10" y1="2" x2="10" y2="5"/><line x1="18" y1="2" x2="18" y2="5"/><line x1="10" y1="23" x2="10" y2="26"/><line x1="18" y1="23" x2="18" y2="26"/></svg>`,
+    desc:'<strong>输入</strong>：30fps MJPEG 摄像头帧。<strong>模型</strong>：YOLOv8-nano（针对 ARM Cortex-A76 优化）。<strong>输出</strong>：bbox (x,y,w,h) + confidence score。结合 Lucas-Kanade 光流法计算活动度评分 (0.0–1.0)，驱动行为优先级调度。',
+    code:`<span class="kw">CLASS</span> <span class="fn">CatTracker</span>:
+    model   ← <span class="fn">YOLOv8</span>(<span class="str">"yolov8n.pt"</span>)
+    flow    ← <span class="fn">LucasKanadeOpticalFlow</span>()
+    prev    ← <span class="op">None</span>
+
+    <span class="fn">detect</span>(frame):
+        results ← model.<span class="fn">predict</span>(frame, conf=<span class="num">0.5</span>)
+        cats    ← [r <span class="kw">for</span> r <span class="kw">in</span> results <span class="kw">if</span> r.cls == <span class="str">"cat"</span>]
+        <span class="kw">RETURN</span> cats[<span class="num">0</span>] <span class="kw">if</span> cats <span class="kw">else</span> <span class="op">None</span>
+
+    <span class="fn">activity_score</span>(frame):
+        <span class="kw">IF</span> prev <span class="op">is None</span>: <span class="kw">RETURN</span> <span class="num">0.0</span>
+        flow_map ← flow.<span class="fn">calc</span>(prev, frame)
+        score    ← flow_map.<span class="fn">magnitude</span>().<span class="fn">mean</span>() / <span class="num">255.0</span>
+        prev     ← frame
+        <span class="kw">RETURN</span> <span class="fn">clamp</span>(score, <span class="num">0.0</span>, <span class="num">1.0</span>)
+
+    <span class="fn">pid_follow</span>(bbox):
+        target_dist ← <span class="num">300</span>  <span class="cm"># mm</span>
+        cur_dist    ← bbox.<span class="fn">depth_estimate</span>()
+        err         ← target_dist - cur_dist
+        pwm         ← Kp*err + Ki*<span class="fn">integral</span>(err) + Kd*<span class="fn">derivative</span>(err)
+        api.<span class="fn">set_motor</span>(left=pwm, right=pwm)`
+  },
+  {
+    module:'perception',
+    name:'Sound Emotion Classifier',
+    brief:'MFCC 特征 + CNN 实时识别猫咪情绪，5分类：hunger / content / alert / distress / purr。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00e5ff" stroke-width="1.5"><path d="M4 20 L8 14 L12 17 L16 8 L20 12 L24 6"/><circle cx="8" cy="14" r="1.5" fill="#00e5ff"/><circle cx="16" cy="8" r="1.5" fill="#00e5ff"/><circle cx="24" cy="6" r="1.5" fill="#00e5ff"/></svg>`,
+    desc:'<strong>采样率</strong>：16kHz，<strong>窗口</strong>：100ms sliding。<strong>特征</strong>：40维 MFCC。<strong>分类器</strong>：3层 CNN + Softmax。情绪状态注入 SurpriseEntropyEngine 决策权重，驱动护理行为（distress → 立即响应）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">SoundClassifier</span>:
+    model   ← <span class="fn">CNN</span>.<span class="fn">load</span>(<span class="str">"emotion_cnn.tflite"</span>)
+    CLASSES ← [<span class="str">"hunger"</span>, <span class="str">"content"</span>, <span class="str">"alert"</span>, <span class="str">"distress"</span>, <span class="str">"purr"</span>]
+
+    <span class="fn">infer</span>(audio_100ms):
+        mfcc   ← <span class="fn">librosa.mfcc</span>(audio_100ms, n_mfcc=<span class="num">40</span>)
+        logits ← model.<span class="fn">predict</span>(mfcc.<span class="fn">expand_dims</span>(<span class="num">0</span>))
+        idx    ← logits.<span class="fn">argmax</span>()
+        conf   ← <span class="fn">softmax</span>(logits)[idx]
+        <span class="kw">IF</span> conf &lt; <span class="num">0.6</span>: <span class="kw">RETURN</span> <span class="str">"unknown"</span>
+        <span class="kw">RETURN</span> CLASSES[idx]
+
+    <span class="cm"># Shared state injected into main loop</span>
+    emotion ← <span class="fn">infer</span>(mic.<span class="fn">sample</span>(<span class="num">0.1</span>))
+    <span class="kw">IF</span> emotion == <span class="str">"distress"</span>:
+        priority ← <span class="str">"care"</span>    <span class="cm"># override hunt behavior</span>`
+  },
+  {
+    module:'hunt',
+    name:'Surprise Entropy Engine',
+    brief:'Shannon 熵量化刺激信息量，ε-greedy Bandit 动态选择行为，从根本上对抗习惯化。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#ff2952" stroke-width="1.5"><polygon points="14,3 25,21 3,21"/><line x1="14" y1="10" x2="14" y2="16"/><circle cx="14" cy="19" r="1" fill="#ff2952"/></svg>`,
+    desc:'<strong>核心假设</strong>：可预测刺激 = 无刺激（习惯化定律）。<strong>熵计算</strong>：H = -Σ p·log(p)，p 为最近 N 次行为分布。<strong>策略</strong>：H 低 → ε↑（探索），H 高 → ε↓（利用）。Bandit 臂对应 hunt 动作库（逗猫棒 / 激光 / 追逐 / 藏匿）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">SurpriseEntropyEngine</span>:
+    N_ARMS  ← <span class="num">8</span>       <span class="cm"># action space size</span>
+    epsilon ← <span class="num">0.3</span>    <span class="cm"># exploration rate</span>
+    counts  ← [<span class="num">0</span>] * N_ARMS
+    rewards ← [<span class="num">0.0</span>] * N_ARMS
+
+    <span class="fn">entropy</span>(history):
+        dist ← <span class="fn">Counter</span>(history[-<span class="num">20</span>:])
+        p    ← [v/len(history[-<span class="num">20</span>:]) <span class="kw">for</span> v <span class="kw">in</span> dist.values()]
+        <span class="kw">RETURN</span> -<span class="fn">sum</span>(pi * <span class="fn">log2</span>(pi) <span class="kw">for</span> pi <span class="kw">in</span> p <span class="kw">if</span> pi > <span class="num">0</span>)
+
+    <span class="fn">select</span>(cat_state, emotion):
+        H ← <span class="fn">entropy</span>(action_history)
+        epsilon ← <span class="fn">map</span>(H, low=<span class="num">0</span>, high=<span class="fn">log2</span>(N_ARMS), to=[<span class="num">0.5</span>,<span class="num">0.1</span>])
+
+        <span class="kw">IF</span> emotion == <span class="str">"distress"</span>: <span class="kw">RETURN</span> <span class="str">"care"</span>
+
+        <span class="kw">IF</span> <span class="fn">random</span>() &lt; epsilon:
+            arm ← <span class="fn">random_arm</span>()    <span class="cm"># explore</span>
+        <span class="kw">ELSE</span>:
+            arm ← <span class="fn">argmax</span>(rewards/counts) <span class="cm"># exploit</span>
+
+        action_history.<span class="fn">append</span>(arm)
+        <span class="kw">RETURN</span> ACTIONS[arm]
+
+    <span class="fn">update</span>(arm, reward):
+        counts[arm]  += <span class="num">1</span>
+        rewards[arm] += (reward - rewards[arm]/counts[arm])`
+  },
+  {
+    module:'hunt',
+    name:'Chassis Auto-Follow',
+    brief:'PID 控制器驱动底盘，保持与猫咪 300mm 最优互动距离，自动跟随移动目标。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#ff2952" stroke-width="1.5"><circle cx="14" cy="14" r="10"/><circle cx="14" cy="14" r="3"/><line x1="14" y1="4" x2="14" y2="11"/><line x1="14" y1="17" x2="14" y2="24"/><line x1="4" y1="14" x2="11" y2="14"/><line x1="17" y1="14" x2="24" y2="14"/></svg>`,
+    desc:'<strong>控制频率</strong>：10Hz。<strong>目标距离</strong>：300mm（猫科动物最适玩耍半径）。<strong>参数</strong>：Kp=0.8, Ki=0.01, Kd=0.2（实测调参值）。<strong>硬件</strong>：双差速电机，PWM 控制，最大速度 0.5m/s。',
+    code:`<span class="kw">CLASS</span> <span class="fn">PIDController</span>:
+    Kp, Ki, Kd ← <span class="num">0.8</span>, <span class="num">0.01</span>, <span class="num">0.2</span>
+    integral   ← <span class="num">0.0</span>
+    prev_err   ← <span class="num">0.0</span>
+    TARGET     ← <span class="num">300</span>  <span class="cm"># mm</span>
+
+    <span class="fn">compute</span>(distance, dt):
+        err        ← TARGET - distance
+        integral   ← <span class="fn">clamp</span>(integral + err*dt, <span class="num">-50</span>, <span class="num">50</span>)
+        derivative ← (err - prev_err) / dt
+        output     ← Kp*err + Ki*integral + Kd*derivative
+        prev_err   ← err
+        <span class="kw">RETURN</span> <span class="fn">clamp</span>(output, <span class="num">-100</span>, <span class="num">100</span>)
+
+    <span class="fn">follow</span>(bbox):
+        dist   ← bbox.<span class="fn">depth_estimate</span>()
+        offset ← bbox.<span class="fn">center_x</span>() - <span class="num">320</span>  <span class="cm"># frame center</span>
+        fwd    ← <span class="fn">compute</span>(dist, <span class="num">0.1</span>)
+        turn   ← offset * <span class="num">0.3</span>
+        api.<span class="fn">move</span>(left=fwd-turn, right=fwd+turn)`
+  },
+  {
+    module:'hunt',
+    name:'Feather Wand Control',
+    brief:'伺服电机驱动逗猫棒，结合猫咪位置动态调整运动轨迹，避免重复性运动模式。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#ff2952" stroke-width="1.5"><path d="M4 24 L20 8"/><circle cx="20" cy="8" r="3"/><path d="M22 4 L26 2 L24 6"/><path d="M18 6 L14 2"/></svg>`,
+    desc:'<strong>自由度</strong>：2轴伺服（仰角 0–90°，方位 0–360°）。<strong>运动库</strong>：8种轨迹模式（扫掠 / 点击 / 环绕 / 抛物线 / 随机微扰）。<strong>选择策略</strong>：Bandit 臂，结合猫咪当前凝视方向优先触发兴趣区域。',
+    code:`<span class="kw">CLASS</span> <span class="fn">FeatherWand</span>:
+    PATTERNS ← [<span class="str">"sweep"</span>, <span class="str">"flick"</span>, <span class="str">"orbit"</span>, <span class="str">"parabola"</span>, <span class="str">"jitter"</span>,
+                <span class="str">"hide"</span>, <span class="str">"pounce_trigger"</span>, <span class="str">"retreat"</span>]
+
+    <span class="fn">execute</span>(pattern, cat_pos):
+        <span class="kw">SWITCH</span> pattern:
+            <span class="str">"sweep"</span>:
+                <span class="kw">FOR</span> angle <span class="kw">in</span> <span class="fn">range</span>(<span class="num">0</span>, <span class="num">180</span>, <span class="num">5</span>):
+                    api.<span class="fn">set_servo</span>(azimuth=angle)
+                    <span class="fn">sleep</span>(<span class="num">0.05</span>)
+            <span class="str">"pounce_trigger"</span>:
+                api.<span class="fn">set_servo</span>(elev=<span class="num">60</span>)
+                <span class="fn">sleep</span>(<span class="num">0.3</span>)
+                api.<span class="fn">set_servo</span>(elev=<span class="num">5</span>)  <span class="cm"># sudden drop</span>
+            <span class="str">"orbit"</span>:
+                <span class="kw">FOR</span> t <span class="kw">in</span> <span class="fn">linspace</span>(<span class="num">0</span>, <span class="num">2</span>*PI, <span class="num">60</span>):
+                    az ← cat_pos.x + <span class="num">80</span>*<span class="fn">cos</span>(t)
+                    el ← <span class="num">45</span> + <span class="num">20</span>*<span class="fn">sin</span>(t)
+                    api.<span class="fn">set_servo</span>(az, el); <span class="fn">sleep</span>(<span class="num">0.033</span>)`
+  },
+  {
+    module:'hunt',
+    name:'Laser Pointer',
+    brief:'精准可控激光点，可编程运动路径，结合猫咪凝视方向自动引导至活动区域。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#ff2952" stroke-width="1.5"><circle cx="14" cy="14" r="2" fill="#ff2952"/><line x1="14" y1="14" x2="24" y2="6"/><line x1="14" y1="4" x2="14" y2="10"/><path d="M8 20 Q14 14 20 8"/></svg>`,
+    desc='<strong>安全等级</strong>：Class 1（&lt;1mW，符合 IEC 60825）。<strong>控制</strong>：2轴云台，1° 分辨率。<strong>模式</strong>：随机游走 / 逃跑触发 / 定点诱导。<strong>自动关闭</strong>：猫咪瞳孔进入警戒区域（检测到直视摄像头）时立即停止。',
+    code:`<span class="kw">CLASS</span> <span class="fn">LaserPointer</span>:
+    SAFE_DISTANCE ← <span class="num">200</span>  <span class="cm"># mm — never point near cat eyes</span>
+
+    <span class="fn">random_walk</span>(duration_s):
+        t_end ← <span class="fn">now</span>() + duration_s
+        x, y  ← <span class="num">320</span>, <span class="num">240</span>
+        <span class="kw">WHILE</span> <span class="fn">now</span>() &lt; t_end:
+            dx ← <span class="fn">gaussian</span>(<span class="num">0</span>, <span class="num">20</span>)
+            dy ← <span class="fn">gaussian</span>(<span class="num">0</span>, <span class="num">15</span>)
+            x, y ← <span class="fn">clamp</span>(x+dx, <span class="num">0</span>,<span class="num">640</span>), <span class="fn">clamp</span>(y+dy,<span class="num">0</span>,<span class="num">480</span>)
+            api.<span class="fn">laser_point</span>(x, y)
+            <span class="fn">sleep</span>(<span class="num">0.05</span>)
+
+    <span class="fn">safe_check</span>(cat_bbox):
+        <span class="kw">IF</span> cat_bbox.<span class="fn">contains_eyes</span>(): api.<span class="fn">laser_off</span>(); <span class="kw">RAISE</span> SafetyStop
+        <span class="kw">IF</span> cat_bbox.<span class="fn">area</span>() &gt; SAFE_DISTANCE: api.<span class="fn">laser_off</span>()`
+  },
+  {
+    module:'care',
+    name:'Health Monitor',
+    brief:'超声波传感器监测饮水量，12h 饮水不足自动告警，历史健康日志 SQLite 持久化。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00ff9d" stroke-width="1.5"><path d="M14 4 C14 4 6 12 6 18 A8 8 0 0 0 22 18 C22 12 14 4 14 4Z"/><line x1="10" y1="18" x2="18" y2="18"/></svg>`,
+    desc='<strong>传感器</strong>：HC-SR04 超声波（精度 ±2mm）。<strong>告警逻辑</strong>：连续 12h 液位未下降 5mm → 推送 FCM 通知。<strong>投食</strong>：舵机驱动分量器，单次投放 5g 猫粮，最大 3次/日（防过食）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">HealthMonitor</span>:
+    last_drink_ts  ← <span class="fn">now</span>()
+    last_level_mm  ← <span class="op">None</span>
+    ALERT_INTERVAL ← <span class="num">12</span> * <span class="num">3600</span>  <span class="cm"># 12 hours</span>
+    DRINK_THRESH   ← <span class="num">5</span>           <span class="cm"># mm drop = drink detected</span>
+
+    <span class="fn">tick</span>():
+        level ← api.<span class="fn">ultrasonic_distance</span>()  <span class="cm"># mm from sensor to water</span>
+        <span class="kw">IF</span> last_level_mm <span class="kw">AND</span> (last_level_mm - level) >= DRINK_THRESH:
+            last_drink_ts ← <span class="fn">now</span>()
+        last_level_mm ← level
+
+        <span class="kw">IF</span> (<span class="fn">now</span>() - last_drink_ts) >= ALERT_INTERVAL:
+            fcm.<span class="fn">push</span>(<span class="str">"⚠ 猫咪超过12小时未饮水"</span>)
+
+    <span class="fn">auto_feed</span>(weight_g=<span class="num">5</span>):
+        <span class="kw">IF</span> daily_feed_count >= <span class="num">3</span>: <span class="kw">RETURN</span>  <span class="cm"># prevent overfeeding</span>
+        api.<span class="fn">dispense</span>(grams=weight_g)
+        daily_feed_count += <span class="num">1</span>
+        db.<span class="fn">log</span>(<span class="str">"feed"</span>, weight_g, <span class="fn">timestamp</span>())`
+  },
+  {
+    module:'care',
+    name:'Meme Generator',
+    brief:'Ring buffer 缓存高 cuteness 分帧，VLM 生成字幕，自动合成分享图推送主人。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00ff9d" stroke-width="1.5"><rect x="3" y="5" width="22" height="16" rx="2"/><circle cx="10" cy="13" r="3"/><path d="M17 10 L22 16 L3 16"/><rect x="9" y="21" width="10" height="3" rx="1"/></svg>`,
+    desc='<strong>Ring buffer</strong>：容量 K=10，按 cuteness_score 维护 top-K 帧。<strong>Cuteness score</strong>：bbox 面积 × 对称性 × 活动度倒数（静止抱团 = 高分）。<strong>VLM</strong>：调用 GPT-4V 生成中文 meme 字幕，风格提示词：猫咪第一视角 + 网络梗。',
+    code:`<span class="kw">CLASS</span> <span class="fn">MemeGenerator</span>:
+    buffer ← <span class="fn">MaxHeap</span>(K=<span class="num">10</span>)  <span class="cm"># (score, frame) pairs</span>
+
+    <span class="fn">cuteness_score</span>(frame, bbox):
+        area    ← bbox.w * bbox.h / (frame.w * frame.h)
+        symmetry← <span class="fn">compute_symmetry</span>(frame, bbox)
+        motion  ← optical_flow.<span class="fn">score</span>(frame)
+        <span class="kw">RETURN</span> area * symmetry * (<span class="num">1</span> - motion * <span class="num">0.5</span>)
+
+    <span class="fn">tick</span>(frame, cats):
+        <span class="kw">IF</span> <span class="op">not</span> cats: <span class="kw">RETURN</span>
+        score ← <span class="fn">cuteness_score</span>(frame, cats[<span class="num">0</span>].bbox)
+        buffer.<span class="fn">push</span>((score, frame.<span class="fn">copy</span>()))
+
+    <span class="fn">generate_meme</span>():
+        score, frame ← buffer.<span class="fn">top</span>()
+        caption ← vlm.<span class="fn">caption</span>(frame,
+            prompt=<span class="str">"以猫咪口吻写一句中文meme，幽默、带网络梗"</span>)
+        meme ← <span class="fn">overlay_text</span>(frame, caption)
+        fcm.<span class="fn">push_image</span>(meme, title=<span class="str">"今日名场面"</span>)`
+  },
+  {
+    module:'care',
+    name:'Daily Diary',
+    brief:'每日 00:00 汇总行为数据，LLM 以猫咪第一视角生成日记，FCM 推送至主人 APP。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00ff9d" stroke-width="1.5"><rect x="5" y="3" width="18" height="22" rx="2"/><line x1="9" y1="9" x2="19" y2="9"/><line x1="9" y1="13" x2="19" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>`,
+    desc='<strong>数据源</strong>：SQLite 聚合当日：互动次数、饮水次数、情绪分布、活动峰值时段。<strong>LLM 提示词</strong>：系统角色 = 猫咪，语气 = 矫情 + 傲娇，包含具体时间戳。<strong>输出</strong>：200字中文日记 + emoji（仅在日记内容中）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">DailyDiary</span>:
+    <span class="fn">generate</span>(date):
+        stats ← db.<span class="fn">query</span>(<span class="str">"""
+            SELECT COUNT(*) plays, SUM(drink_events) drinks,
+                   AVG(activity) avg_activity,
+                   MODE(emotion) dominant_emotion
+            FROM events WHERE date = ?
+        """</span>, date)
+
+        prompt ← <span class="str">f"""
+你是一只猫，请用第一人称写今天的日记（约200字）。
+数据：玩耍{stats.plays}次，饮水{stats.drinks}次，
+主要情绪{stats.dominant_emotion}，平均活跃度{stats.avg_activity:.2f}。
+风格：傲娇、矫情、偶尔感动。
+"""</span>
+        diary ← llm.<span class="fn">complete</span>(prompt, max_tokens=<span class="num">300</span>)
+        db.<span class="fn">save_diary</span>(date, diary)
+        fcm.<span class="fn">push</span>(title=<span class="str">f"{date} 今日日记"</span>, body=diary[:<span class="num">80</span>]+<span class="str">"…"</span>)`
+  },
+  {
+    module:'care',
+    name:'Memory Box',
+    brief:'Beta-Bandit 持久化猫咪偏好，每次互动贝叶斯更新，生成个性化生命回忆录 PDF。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00ff9d" stroke-width="1.5"><rect x="4" y="8" width="20" height="16" rx="2"/><path d="M10 8 V5 A4 4 0 0 1 18 5 V8"/><line x1="14" y1="14" x2="14" y2="18"/><circle cx="14" cy="13" r="1" fill="#00ff9d"/></svg>`,
+    desc='<strong>模型</strong>：每个行为臂维护 Beta(α, β) 分布。<strong>更新</strong>：reward=1 → α+=1（成功），reward=0 → β+=1（失败）。<strong>采样</strong>：Thompson Sampling 选择最高期望臂。年度生成 PDF 回忆录（meme 精选 + 情绪热力图 + 成长曲线）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">MemoryBox</span>:
+    <span class="cm"># Beta(alpha, beta) per arm — loaded from SQLite</span>
+    arms ← {arm: (<span class="num">1.0</span>, <span class="num">1.0</span>) <span class="kw">for</span> arm <span class="kw">in</span> ACTION_SPACE}
+
+    <span class="fn">thompson_sample</span>():
+        <span class="kw">RETURN</span> <span class="fn">argmax</span>({
+            arm: <span class="fn">beta_random</span>(a, b)
+            <span class="kw">for</span> arm, (a, b) <span class="kw">in</span> arms.items()
+        })
+
+    <span class="fn">update</span>(arm, reward):
+        a, b ← arms[arm]
+        <span class="kw">IF</span> reward == <span class="num">1</span>: arms[arm] ← (a+<span class="num">1</span>, b)
+        <span class="kw">ELSE</span>:          arms[arm] ← (a, b+<span class="num">1</span>)
+        db.<span class="fn">save_bandit_state</span>(arms)
+
+    <span class="fn">generate_memoir</span>(year):
+        top_moments ← db.<span class="fn">top_memes</span>(year, n=<span class="num">20</span>)
+        emotion_map  ← db.<span class="fn">emotion_heatmap</span>(year)
+        growth_curve ← db.<span class="fn">activity_trend</span>(year)
+        pdf.<span class="fn">render</span>(top_moments, emotion_map, growth_curve,
+                   title=<span class="str">f"我的{year}年 — 橘子的生命故事"</span>)`
+  },
+  {
+    module:'care',
+    name:'Remote Monitoring & App Push',
+    brief:'WebRTC 低延迟直播，MQTT 实时状态同步，FCM 推送告警与日记至主人 APP。',
+    icon:`<svg viewBox="0 0 28 28" fill="none" stroke="#00ff9d" stroke-width="1.5"><rect x="8" y="3" width="12" height="20" rx="2"/><line x1="12" y1="19" x2="16" y2="19"/><circle cx="14" cy="7" r="1" fill="#00ff9d"/><path d="M2 12 Q4 8 8 10"/><path d="M26 12 Q24 8 20 10"/></svg>`,
+    desc='<strong>视频</strong>：WebRTC P2P 直播，延迟 &lt;200ms，分辨率自适应（720p / 480p）。<strong>MQTT</strong>：QoS 1，状态主题 hunter/status（情绪 / 活动度 / 液位）10s 间隔发布。<strong>FCM</strong>：告警推送（饮水 / 异常行为），日记推送（每日 00:00）。',
+    code:`<span class="kw">CLASS</span> <span class="fn">RemoteMonitor</span>:
+    <span class="fn">start_webrtc</span>():
+        pc ← <span class="fn">RTCPeerConnection</span>(ice_servers=STUN_SERVERS)
+        pc.<span class="fn">add_track</span>(camera.<span class="fn">stream</span>())
+        offer ← pc.<span class="fn">create_offer</span>()
+        signaling.<span class="fn">send</span>(offer)   <span class="cm"># to mobile app</span>
+        <span class="kw">RETURN</span> pc
+
+    <span class="fn">mqtt_publish</span>(state):
+        payload ← {
+            <span class="str">"emotion"</span>:   state.emotion,
+            <span class="str">"activity"</span>:  state.activity_score,
+            <span class="str">"water_mm"</span>:  state.water_level,
+            <span class="str">"ts"</span>:        <span class="fn">unix_timestamp</span>()
+        }
+        mqtt.<span class="fn">publish</span>(<span class="str">"hunter/status"</span>, <span class="fn">json</span>(payload), qos=<span class="num">1</span>)
+
+    <span class="fn">push_alert</span>(type, msg):
+        fcm.<span class="fn">send</span>(topic=<span class="str">"alerts"</span>, data={
+            <span class="str">"type"</span>: type, <span class="str">"message"</span>: msg,
+            <span class="str">"ts"</span>: <span class="fn">iso8601</span>()
+        })`
+  }
+];
+
+// ── RENDER FEATURES ──────────────────────────────────────────────
+const grid = document.getElementById('features-grid');
+FEATURES.forEach((f,i)=>{
+  const card = document.createElement('div');
+  card.className = 'feature-card';
+  card.innerHTML = `
+    <div class="feature-module module-${f.module}">${f.module.toUpperCase()}</div>
+    <div class="feature-icon">${f.icon}</div>
+    <div class="feature-name">${f.name}</div>
+    <div class="feature-brief">${f.brief}</div>
+  `;
+  card.addEventListener('click',()=>openModal(f));
+  grid.appendChild(card);
+});
+
+// ── MODAL ────────────────────────────────────────────────────────
+const modal   = document.getElementById('modal');
+const mTitle  = document.getElementById('modal-title');
+const mDesc   = document.getElementById('modal-desc');
+const mCode   = document.getElementById('modal-code');
+const mClose  = document.getElementById('modal-close');
+
+function openModal(f){
+  mTitle.textContent = f.name;
+  mDesc.innerHTML = f.desc;
+  mCode.innerHTML = f.code;
+  modal.classList.add('active');
+  document.body.style.overflow='hidden';
+}
+function closeModal(){
+  modal.classList.remove('active');
+  document.body.style.overflow='';
+}
+mClose.addEventListener('click',closeModal);
+modal.addEventListener('click',e=>{ if(e.target===modal) closeModal(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+
+// ── ANIMATED BORDER on arch nodes ───────────────────────────────
+document.querySelectorAll('.arch-node').forEach(n=>{
+  n.addEventListener('mouseenter',()=>{ n.style.boxShadow='0 0 20px currentColor'; });
+  n.addEventListener('mouseleave',()=>{ n.style.boxShadow=''; });
 });
 </script>
 </body>
