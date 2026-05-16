@@ -47,7 +47,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from src.api_client import HunterAPI
+from software.api_client import HunterAPI
 
 # ── 数据库路径（与 memory / report 共享同一 DB）────────────────────────────
 _DB_PATH = Path(__file__).parent.parent.parent / "data" / "hunter.db"

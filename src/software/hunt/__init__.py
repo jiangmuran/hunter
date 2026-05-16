@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 
-from src.api_client import HunterAPI
+from software.api_client import HunterAPI
 from software.perception import CatDetector
 
 # ── 可调参数 ────────────────────────────────────────────────────────────────

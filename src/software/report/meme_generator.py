@@ -29,8 +29,8 @@ from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from api_client import HunterAPI
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from software.api_client import HunterAPI
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
 OUTPUT_DIR      = Path(__file__).parent.parent.parent / "output" / "memes"
