@@ -19,7 +19,9 @@ ExecStart=/home/pi/yolo_env/bin/python3 /home/pi/Desktop/web_console.py
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
-TimeoutStopSec=10
+# 30s 给 lifespan shutdown 充分时间 (cv2 cap.release / ser.close / yolo torch),
+# 避免 SIGKILL 留 driver state 尾巴让下次启动 ESP32 通信卡死
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 

@@ -23,28 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.expanduser("~/Desktop"))
 
-# ====== Prevent ESP32 reset when opening serial (preserves BT remote pairing) ======
-# 默认 pyserial 打开串口会 assert DTR/RTS,在 ESP32+CH340 板上 = 触发 EN 复位
-# → 蓝牙手柄连接丢失。这里把 DTR/RTS 先置 False 再 open,ESP32 不重启。
+# 用 default pyserial behaviour (跟 main_test.py 一致)
 import serial as _pyserial
-_orig_serial_init = _pyserial.Serial.__init__
-def _patched_serial_init(self, *args, **kwargs):
-    port = kwargs.get("port", args[0] if args else None)
-    if port is None:
-        _orig_serial_init(self, *args, **kwargs)
-        return
-    kwargs2 = {**kwargs, "port": None}
-    if args and "port" not in kwargs:
-        args = args[1:]
-    _orig_serial_init(self, *args, **kwargs2)
-    self.port = port
-    try:
-        self.dtr = False
-        self.rts = False
-    except Exception:
-        pass
-    self.open()
-_pyserial.Serial.__init__ = _patched_serial_init
 
 from car_driver import CarController
 from audio_driver import AudioController
@@ -60,12 +40,15 @@ except Exception:
     _yolo_ok = False
     YOLO = None
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 
 REC_DIR = "/home/pi/car_project/records"
 SOUND_DIR = "/home/pi/car_project/sounds"
+UPLOADS_DIR = "/home/pi/car_project/uploads"
+ALLOWED_AUDIO_EXT = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
+MAX_UPLOAD_SIZE = 30 * 1024 * 1024  # 30 MB,够一首歌
 
 car: CarController | None = None
 audio: AudioController | None = None
@@ -91,6 +74,7 @@ state: dict = {
     "recording": False,
     "rec_path": None,
     "rec_start_t": None,
+    "esp32_deadlock": False,
 }
 
 MAX_RECORDING_DURATION_S = 5 * 60  # 5 分钟自动 stop,防止前端断开导致孤儿录音
@@ -633,6 +617,8 @@ def push_log(line: str, kind: str = "esp32"):
     bcast({"type": "log", "data": entry})
 
 
+SOFT_AVOID_THRESHOLD_MM = 250  # 软件避障触发距离
+
 def on_ultra(data: dict):
     sid = data["sensor_id"]
     state["ultra"][sid] = {
@@ -643,6 +629,14 @@ def on_ultra(data: dict):
     bcast({"type": "ultra", "data": state["ultra"]})
     if minimap is not None:
         minimap.on_ultra(sid, data["distance_mm"], data["has_obstacle"])
+    # 软件避障:OBSTACLE 模式启用且任一 sensor 报有障碍且距离 < 阈值 → 主动 stop
+    # (用 service 替代 ESP32 自主避障,这样 ULTRA_REPORT 和"避障"可以同时开,minimap 也能记轨迹)
+    if state["modes"].get("obstacle") and data["has_obstacle"] and data["distance_mm"] < SOFT_AVOID_THRESHOLD_MM:
+        if state["last_action"] not in ("STOP", "EMERGENCY_STOP"):
+            push_log(f"soft-avoid: S{sid} {data['distance_mm']}mm obstacle → STOP", "cmd")
+            try:
+                if car is not None: car.stop()
+            except Exception: pass
 
 
 def on_ps3_l1():
@@ -684,15 +678,20 @@ def install_event_hooks():
                     minimap.set_button_speed(bs)
             except Exception: pass
         elif line == "3WD-ROBOT-START":
-            # ESP32 刚刚启动(物理复位或 USB 重插)→ 1 秒后自动重新启用 ULTRA_REPORT
-            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 1s", "sys")
+            # ESP32 刚刚启动(物理复位 / RTS pulse / USB 重插)→ 3 秒后自动重启用 ULTRA_REPORT
+            # 3 秒给 BluePad32 蓝牙栈 init 时间,避免命令撞 ESP32 init phase 被丢
+            push_log("ESP32 boot signal detected, re-enabling ULTRA_REPORT in 3s", "sys")
+            # 顺便清死锁标志(RTS 自动恢复成功的标志)
+            if state.get("esp32_deadlock"):
+                state["esp32_deadlock"] = False
+                bcast({"type": "state", "data": state})
             def _reapply():
                 try:
                     if car is not None:
                         car.ultrasonic_report_on()
                 except Exception as e:
                     push_log(f"auto re-enable ultra_report failed: {e}", "sys")
-            threading.Timer(1.0, _reapply).start()
+            threading.Timer(3.0, _reapply).start()
 
         if not line.startswith("ULTRA,"):
             push_log(line, "esp32")
@@ -714,32 +713,47 @@ def install_event_hooks():
     }
 
     def wrapped_send(c: str):
+        # ====== 软件避障:OBSTACLE 命令转 ULTRA_REPORT + 设软避障标志 ======
+        # ESP32 firmware 把 OBSTACLE 和 ULTRA_REPORT 设成互斥,开 OBSTACLE 时:
+        #  - ESP32 不推 ULTRA 数据(UI 看不到距离/mini-map 没源)
+        #  - ESP32 自主控制车(wrapped_send 看不到方向 → minimap 记不到轨迹)
+        # 我们改成软件避障:实际启用 ULTRA_REPORT,服务端 on_ultra 检测障碍 → 发 stop。
+        if c == "o":
+            push_log("OBSTACLE_ON → soft-avoid (ULTRA_REPORT + service-side stop)", "cmd")
+            state["modes"]["obstacle"] = True
+            state["modes"]["ultra_report"] = True  # 软避障内部用 ULTRA_REPORT
+            state["last_action"] = "OBSTACLE_ON"
+            bcast({"type": "state", "data": state})
+            # 内部发 'u' 切到 ULTRA_REPORT
+            try: orig_send("u")
+            except Exception as e: push_log(f"soft-avoid enable failed: {e}", "sys")
+            return
+        if c == "p":
+            push_log("OBSTACLE_OFF (soft-avoid disabled, ULTRA_REPORT 保留)", "cmd")
+            state["modes"]["obstacle"] = False
+            state["last_action"] = "OBSTACLE_OFF"
+            bcast({"type": "state", "data": state})
+            # 不发 'p' 也不关 ultra(让数据持续)
+            return
+
         action = cmd_to_action.get(c, f"SEND({c})")
         state["last_action"] = action
         if action == "EMERGENCY_STOP":
             state["modes"]["emergency"] = True
+            state["modes"]["obstacle"] = False  # 急停同时清软避障
         elif action != "STOP":
             state["modes"]["emergency"] = False
         push_log(f"tx: {action}", "cmd")
         bcast({"type": "state", "data": state})
         if minimap is not None:
-            # 只把方向类 action 设为 current,STOP / 急停立即清零,其他保持
             if action in ("FORWARD","BACKWARD","LEFT","RIGHT","ROT_CW","ROT_CCW"):
                 minimap.set_action(action)
             elif action in ("STOP", "EMERGENCY_STOP"):
                 minimap.set_action(None)
-        # 串口写带 1 次 retry(短瞬故障常见,长故障靠 serial watchdog)
-        last_err = None
-        for attempt in range(2):
-            try:
-                orig_send(c)
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(0.05)
-        if last_err is not None:
-            push_log(f"send fail (2 attempts) {action}: {last_err}", "sys")
+        try:
+            orig_send(c)
+        except Exception as e:
+            push_log(f"send fail {action}: {e}", "sys")
 
     car.send = wrapped_send
 
@@ -752,25 +766,29 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
 
     push_log("boot: initializing CarController", "sys")
-    try:
-        car = CarController(
-            ultrasonic_callback=on_ultra,
-            ps3_l1_callback=on_ps3_l1,
-            ps3_l2_callback=on_ps3_l2,
-        )
-        install_event_hooks()
-        push_log("boot: car ready", "sys")
-        # 默认启用 ULTRA_REPORT,让超声波数据开箱即用。
-        # 用户切到 OBSTACLE 模式时 setObs(true) 会先 ultra_off 再 obstacle_on(互斥已处理)。
+    car = None
+    for attempt in range(3):
         try:
-            await asyncio.sleep(0.3)
-            car.ultrasonic_report_on()
-            push_log("boot: enabled ULTRA_REPORT by default", "sys")
+            car = CarController(
+                ultrasonic_callback=on_ultra,
+                ps3_l1_callback=on_ps3_l1,
+                ps3_l2_callback=on_ps3_l2,
+            )
+            install_event_hooks()
+            push_log(f"boot: car ready (attempt {attempt+1})", "sys")
+            break
         except Exception as e:
-            push_log(f"boot: ultra_report auto-enable failed: {e}", "sys")
-    except Exception as e:
-        push_log(f"boot: car FAILED: {e}", "sys")
-        car = None
+            push_log(f"boot: car init attempt {attempt+1} failed: {e}", "sys")
+            await asyncio.sleep(3)
+    if car is not None:
+        # 等 5s 给 ESP32 BluePad32 蓝牙栈充分 init,降低首次 'u' 撞 init phase 导致丢命令的概率
+        # 如果还失败,_ultra_keepalive 会接管 retry。
+        try:
+            await asyncio.sleep(5.0)
+            car.ultrasonic_report_on()
+            push_log("boot: sent ULTRA_REPORT_ON after 5s wait", "sys")
+        except Exception as e:
+            push_log(f"boot: initial ultra_report send failed: {e}", "sys")
 
     push_log("boot: initializing AudioController", "sys")
     try:
@@ -814,67 +832,6 @@ async def lifespan(app: FastAPI):
             push_log(f"boot: YOLO FAILED: {e}", "sys")
             yolo = None
 
-    # ---- ESP32 串口故障检测 + 自动重连(覆盖三种场景)----
-    # 1) 开机时 car init 就失败 (USB 没插好 / ESP32 没上电) → 重试 init
-    # 2) 运行中 USB 拔了 / 串口失效 → reopen
-    # 3) ESP32 firmware 复位但 host serial 还有效 → 不动 (reader 会自己收数据)
-    async def _serial_watchdog():
-        nonlocal_dummy = None  # placeholder
-        global car
-        consec_fail = 0
-        while True:
-            try:
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                return
-            # 场景 1: car 整个没初始化成功 → 重试 CarController()
-            if car is None:
-                try:
-                    push_log("serial watchdog: trying CarController init...", "sys")
-                    new_car = CarController(
-                        ultrasonic_callback=on_ultra,
-                        ps3_l1_callback=on_ps3_l1,
-                        ps3_l2_callback=on_ps3_l2,
-                    )
-                    car = new_car
-                    install_event_hooks()
-                    push_log("serial watchdog: car initialized after retry", "sys")
-                    consec_fail = 0
-                    try:
-                        await asyncio.sleep(0.3)
-                        car.ultrasonic_report_on()
-                        push_log("serial watchdog: re-enabled ULTRA_REPORT", "sys")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    consec_fail += 1
-                    push_log(f"serial watchdog: car init failed #{consec_fail}: {e}", "sys")
-                continue
-            # 场景 2: car 存在但串口探测异常 → close + reopen
-            try:
-                if car.ser is None or not car.ser.is_open:
-                    raise IOError("ser not open")
-                _ = car.ser.in_waiting
-                _ = car.ser.port
-                consec_fail = 0
-                continue
-            except Exception as e:
-                consec_fail += 1
-                push_log(f"serial watchdog: fault #{consec_fail}: {e}", "sys")
-            try: car.ser.close()
-            except Exception: pass
-            await asyncio.sleep(min(2 + consec_fail, 10))
-            try:
-                new_ser = _pyserial.Serial(
-                    port=car.port, baudrate=car.baudrate, timeout=0.1,
-                )
-                car.ser = new_ser
-                push_log(f"serial watchdog: reconnected ({car.port})", "sys")
-                consec_fail = 0
-            except Exception as e2:
-                push_log(f"serial watchdog: reconnect failed: {e2}", "sys")
-    _sw_task = asyncio.create_task(_serial_watchdog())
-
     # ---- 录音超时:5 分钟自动 stop,防止前端断开/标签关闭导致 arecord 孤儿 ----
     async def _rec_timeout_watcher():
         while True:
@@ -898,6 +855,89 @@ async def lifespan(app: FastAPI):
                     push_log(f"audio auto-stop err: {e}", "sys")
     _rt_task = asyncio.create_task(_rec_timeout_watcher())
 
+    # ---- ULTRA_REPORT keep-alive + 自动恢复 (RTS pulse → ESP32 EN reset) ----
+    # 流程:
+    #   1) ESP32 沉默 > 12s → 温和重发 'u'
+    #   2) 连续 3 次重发都沉默 → 设 esp32_deadlock=True + 自动尝试 RTS pulse 让 ESP32 cold reset
+    #      (yahboom 板 CH340 RTS 通常经反相接 ESP32 EN,toggle 等于按 RST 按钮)
+    #   3) 等 8s 给 ESP32 boot,如果还是沉默 → 再 pulse 一次(最多 3 次)
+    #   4) 3 次自动都救不回 → banner 引导用户关车电池(物理层最后兜底)
+    async def _esp32_rts_pulse():
+        """RTS 脉冲模拟按 ESP32 RST 按钮。需要 yahboom 板把 CH340 RTS 接 ESP32 EN(经反相电路)。"""
+        if car is None or car.ser is None or not car.ser.is_open:
+            return False
+        try:
+            # 序列:DTR 保持 release(IO0=HIGH 防止进 download mode)
+            #       RTS pulse LOW→HIGH→LOW 触发 EN reset
+            car.ser.setDTR(False)
+            car.ser.setRTS(True)    # EN=LOW (reset 触发)
+            await asyncio.sleep(0.12)
+            car.ser.setRTS(False)   # EN=HIGH 释放,ESP32 开始 boot
+            return True
+        except Exception as e:
+            push_log(f"RTS pulse failed: {e}", "sys")
+            return False
+
+    async def _ultra_keepalive():
+        last_reattempt = 0
+        REATTEMPT_INTERVAL = 10.0
+        ESP32_SILENT_THRESHOLD_MS = 12000
+        DEADLOCK_AFTER_ATTEMPTS = 3
+        MAX_AUTO_RESET = 3
+        consec_attempts = 0
+        auto_reset_count = 0
+        post_reset_wait_until = 0
+        while True:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            if car is None: continue
+            if state["modes"]["obstacle"] or state["modes"]["emergency"]: continue
+            # 如果在 reset 之后还在等 ESP32 boot 起来,跳过这一轮
+            if time.time() < post_reset_wait_until: continue
+            age_ms = (time.time() - t_last_esp32) * 1000 if t_last_esp32 else 99999
+            if age_ms < ESP32_SILENT_THRESHOLD_MS:
+                # ESP32 在喘气 → 清死锁标志 + 计数器
+                consec_attempts = 0
+                auto_reset_count = 0
+                if state["esp32_deadlock"]:
+                    state["esp32_deadlock"] = False
+                    push_log("ESP32 alive again, deadlock cleared", "sys")
+                    bcast({"type": "state", "data": state})
+                continue
+            now = time.time()
+            if now - last_reattempt < REATTEMPT_INTERVAL: continue
+            last_reattempt = now
+            consec_attempts += 1
+            push_log(f"keep-alive #{consec_attempts}: ESP32 silent {int(age_ms)}ms, resending 'u'", "sys")
+            try: car.ultrasonic_report_on()
+            except Exception as e:
+                push_log(f"keep-alive resend failed: {e}", "sys")
+
+            if consec_attempts >= DEADLOCK_AFTER_ATTEMPTS:
+                if not state["esp32_deadlock"]:
+                    state["esp32_deadlock"] = True
+                    push_log(f"ESP32 DEADLOCK detected ({consec_attempts} silent retries)", "sys")
+                    bcast({"type": "state", "data": state})
+                # 自动 RTS 恢复:最多尝试 MAX_AUTO_RESET 次
+                if auto_reset_count < MAX_AUTO_RESET:
+                    auto_reset_count += 1
+                    push_log(f"auto-recovery #{auto_reset_count}/{MAX_AUTO_RESET}: pulsing RTS to reset ESP32", "sys")
+                    ok = await _esp32_rts_pulse()
+                    if ok:
+                        # 给 ESP32 8s 跑完 boot + BluePad32 init
+                        post_reset_wait_until = time.time() + 8
+                        # boot 完后会自动收到 3WD-ROBOT-START → wrapped_handle 触发 ultra_report_on
+                else:
+                    # 自动恢复用完了,只能靠用户物理操作 — banner 已经在
+                    pass
+
+    _ka_task = asyncio.create_task(_ultra_keepalive())
+
+    # 把 reset 函数暴露给手动 endpoint 用
+    app.state.esp32_rts_pulse = _esp32_rts_pulse
+
     push_log("boot: starting MiniMap (dead-reckoning + occupancy)", "sys")
     minimap = MiniMap()
     minimap.start()
@@ -917,12 +957,24 @@ async def lifespan(app: FastAPI):
     yield
     push_log("system shutdown", "sys")
     _mm_task.cancel()
-    _sw_task.cancel()
     _rt_task.cancel()
+    _ka_task.cancel()
+
+    # 每个 obj.close() 包到独立 thread,5s timeout,防止某个 close 阻塞 → SIGKILL → 留 driver state 尾巴
+    def _safe_close(obj, name):
+        try:
+            (obj.close() if hasattr(obj, "close") else obj.stop())
+        except Exception as e:
+            print(f"[shutdown] {name} close error: {e}")
+
+    # car 优先 close,确保 ser.close() 在 SIGKILL 前完成
     for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
-        try: obj.close() if hasattr(obj, "close") else obj.stop()
-        except Exception: pass
+        t = threading.Thread(target=_safe_close, args=(obj, name), daemon=True)
+        t.start()
+        t.join(timeout=5)
+        if t.is_alive():
+            print(f"[shutdown] {name} close took >5s, skipping")
 
 
 API_DESCRIPTION = """
@@ -963,6 +1015,19 @@ app = FastAPI(
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     return HTMLResponse(INDEX_HTML)
+
+
+@app.post("/api/system/esp32_reset", tags=["state"], summary="用 RTS 脉冲 cold-reset ESP32 (等价按板上 RST 按钮)",
+          description="yahboom 板 CH340 RTS 通常经反相接 ESP32 EN。toggle 让 ESP32 重启 firmware,不进 download mode。如果板子没接这个引脚,无效但无害。")
+async def system_esp32_reset(req: Request):
+    if car is None or car.ser is None or not car.ser.is_open:
+        raise HTTPException(503, "serial port not open")
+    pulse = getattr(app.state, "esp32_rts_pulse", None)
+    if pulse is None:
+        raise HTTPException(503, "rts pulse helper not initialized")
+    ok = await pulse()
+    push_log(f"manual ESP32 RTS pulse: {'ok' if ok else 'failed'}", "sys")
+    return {"ok": ok, "msg": "RTS pulsed; ESP32 booting (5-10s); ULTRA_REPORT will auto re-enable on 3WD-ROBOT-START"}
 
 
 @app.post("/api/system/restart", tags=["state"], summary="重启 robot-console.service",
@@ -1281,8 +1346,8 @@ async def list_recordings():
     return {"items": items[:30]}
 
 
-@app.post("/api/audio/play", tags=["audio"], summary="播放指定 wav",
-          description="body: `{name: \"xxx.wav\", src: \"recordings\"|\"sounds\"}`")
+@app.post("/api/audio/play", tags=["audio"], summary="播放指定音频(支持 wav/mp3/ogg/flac/m4a)",
+          description="body: `{name: \"xxx\", src: \"recordings\"|\"sounds\"|\"uploads\"}`。所有格式走 ffmpeg → ALSA。")
 async def audio_play(req: Request):
     if audio is None:
         raise HTTPException(503, "audio not ready")
@@ -1291,12 +1356,24 @@ async def audio_play(req: Request):
     src = body.get("src", "recordings")
     if "/" in name or ".." in name or not name:
         raise HTTPException(400, "bad name")
-    base = REC_DIR if src == "recordings" else SOUND_DIR
+    dirs = {"recordings": REC_DIR, "sounds": SOUND_DIR, "uploads": UPLOADS_DIR}
+    base = dirs.get(src)
+    if base is None:
+        raise HTTPException(400, "bad src")
     full = os.path.join(base, name)
     if not os.path.exists(full):
         raise HTTPException(404, "not found")
+    import subprocess as _sp
     try:
-        audio.play_wav(full)
+        # 用 ffmpeg 直接输出 ALSA,任何格式都通(wav/mp3/ogg/flac/m4a/aac),
+        # 进程句柄记到 audio.play_process 让 stop_playback 能 kill 它
+        with audio.play_lock:
+            audio._stop_playback_locked()
+            audio.play_process = _sp.Popen(
+                ["ffmpeg", "-loglevel", "quiet", "-nostdin",
+                 "-i", full, "-f", "alsa", audio.audio_device],
+                stdin=_sp.DEVNULL,
+            )
     except Exception as e:
         raise HTTPException(500, str(e))
     push_log(f"play: {src}/{name}", "audio")
@@ -1357,6 +1434,85 @@ async def set_volume(req: Request):
         "mic": _amixer_get("Mic"),
     }})
     return out
+
+
+@app.post("/api/audio/upload", tags=["audio"], summary="上传 mp3/wav/ogg/flac 等音频到 ~/car_project/uploads/",
+          description="multipart/form-data。允许扩展名: mp3/wav/ogg/flac/m4a/aac。最大 30MB。")
+async def audio_upload(file: UploadFile = File(...)):
+    name = file.filename or ""
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in ALLOWED_AUDIO_EXT:
+        raise HTTPException(400, f"unsupported ext {ext}; allowed: {sorted(ALLOWED_AUDIO_EXT)}")
+    safe = os.path.basename(name)
+    if "/" in safe or ".." in safe or not safe:
+        raise HTTPException(400, "bad filename")
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    dest = os.path.join(UPLOADS_DIR, safe)
+    size = 0
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk: break
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE:
+                    f.close()
+                    try: os.unlink(dest)
+                    except Exception: pass
+                    raise HTTPException(413, f"file too large (>{MAX_UPLOAD_SIZE//1024//1024}MB)")
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    push_log(f"upload: {safe} ({size//1024} KB)", "audio")
+    return {"ok": True, "name": safe, "size": size, "path": dest}
+
+
+@app.get("/api/audio/uploads", tags=["audio"], summary="列出已上传的音乐")
+async def list_uploads():
+    if not os.path.isdir(UPLOADS_DIR):
+        return {"items": []}
+    items = []
+    for fn in os.listdir(UPLOADS_DIR):
+        if os.path.splitext(fn)[1].lower() not in ALLOWED_AUDIO_EXT: continue
+        full = os.path.join(UPLOADS_DIR, fn)
+        try: st = os.stat(full)
+        except OSError: continue
+        items.append({"name": fn, "size": st.st_size, "mtime": int(st.st_mtime)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"items": items[:50]}
+
+
+@app.delete("/api/audio/upload/{name}", tags=["audio"], summary="删除单个上传文件")
+async def delete_upload(name: str):
+    if "/" in name or ".." in name or not name:
+        raise HTTPException(400, "bad name")
+    p = os.path.join(UPLOADS_DIR, name)
+    if not os.path.exists(p):
+        raise HTTPException(404, "not found")
+    try:
+        os.unlink(p)
+        push_log(f"upload deleted: {name}", "audio")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/recordings", tags=["audio"], summary="清空所有录音(只删 *.wav)")
+async def clear_recordings():
+    if not os.path.isdir(REC_DIR):
+        return {"ok": True, "removed": 0}
+    n = 0; err = 0
+    for fn in os.listdir(REC_DIR):
+        if not fn.endswith(".wav"): continue
+        try:
+            os.unlink(os.path.join(REC_DIR, fn))
+            n += 1
+        except Exception:
+            err += 1
+    push_log(f"recordings cleared: {n} files removed, {err} errors", "audio")
+    return {"ok": True, "removed": n, "errors": err}
 
 
 @app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放 (audio_driver 和 car_driver 两路 aplay 都 kill)")
@@ -1719,6 +1875,20 @@ svg.schem{width:100%;height:100%;display:block}
 </style>
 </head>
 <body>
+<div id="deadlockBanner" style="display:none;position:fixed;top:0;left:0;right:0;
+  background:linear-gradient(90deg,#a8221a,#ff3a2e,#a8221a);color:#0b0907;
+  text-align:center;padding:12px 20px;font-weight:800;letter-spacing:.2em;z-index:9999;
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11.5px;
+  border-bottom:2px solid #0b0907;text-transform:uppercase;line-height:1.5">
+  ⚠ ESP32 FIRMWARE DEADLOCK · auto-recovery exhausted<br>
+  <span style="font-weight:500;letter-spacing:.12em">
+    try
+    <button id="btnTryRtsReset" style="background:#0b0907;color:#ff3a2e;border:1px solid #0b0907;padding:3px 10px;font-family:inherit;font-size:11px;font-weight:700;letter-spacing:.15em;cursor:pointer;margin:0 4px;text-transform:uppercase">⟳ RTS RESET</button>
+    again, or
+    <b>car battery OFF → wait 5s → ON → click RESTART</b>
+  </span>
+</div>
+
 <div id="app">
   <header>
     <div class="h-brand">ROBOT_CTRL</div>
@@ -1988,8 +2158,21 @@ svg.schem{width:100%;height:100%;display:block}
         </div>
       </div>
 
+      <div>
+        <div class="sec-label" style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+          <span>UPLOADS · MP3 / WAV / FLAC</span>
+          <label class="map-reset-btn" style="cursor:pointer;border-color:var(--amber-d);color:var(--amber);margin-left:0">
+            + UPLOAD<input type="file" id="uploadFile" accept=".mp3,.wav,.ogg,.flac,.m4a,.aac" style="display:none">
+          </label>
+        </div>
+        <div class="audio-list" id="uploadsList" style="max-height:130px"><div class="audio-empty">— EMPTY —</div></div>
+      </div>
+
       <div style="flex:1;display:flex;flex-direction:column;min-height:0">
-        <div class="sec-label">RECORDINGS · CLICK TO PLAY</div>
+        <div class="sec-label" style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+          <span>RECORDINGS · CLICK TO PLAY</span>
+          <button class="map-reset-btn" id="btnClearRecs" style="border-color:var(--red-d);color:var(--red);margin-left:0" title="delete all recordings">⌫ CLEAR</button>
+        </div>
         <div class="audio-list" id="recList"><div class="audio-empty">— EMPTY —</div></div>
       </div>
     </div>
@@ -2030,6 +2213,12 @@ svg.schem{width:100%;height:100%;display:block}
       else if (m.type === 'ultra'){ applyUltra(m.data); }
       else if (m.type === 'log'){ addLog(m.data); }
       else if (m.type === 'yolo'){
+        if (!yoloEnabled){
+          // YOLO 已关闭,任何残留 WS yolo event 都 ignore + 强制清空 SVG
+          const layer = document.getElementById('yoloBoxes');
+          if (layer && layer.innerHTML) layer.innerHTML = '';
+          return;
+        }
         renderYoloBoxes(m.data.detections);
         $('#yoloStat').textContent = `${m.data.inference_ms}ms · ${m.data.detections.length}`;
       }
@@ -2307,23 +2496,12 @@ svg.schem{width:100%;height:100%;display:block}
     });
   });
 
-  // ============ Toggles (handle ESP32 mutual exclusion) ============
+  // ============ Toggles ============
+  // 后端 OBSTACLE 已改为"软件避障"(内部启 ULTRA_REPORT + 服务端检距停车),
+  // 跟 ULTRA_REPORT 不互斥了 — 前端不再需要先 off 再 on 的复合操作。
   let modeObs = false, modeUltra = false;
-  async function setObs(on){
-    if (on && modeUltra){
-      // ESP32 互斥:开避障必须先关超声波上报
-      cmd('ultra_off');
-      await new Promise(r => setTimeout(r, 150));
-    }
-    cmd(on ? 'obstacle_on' : 'obstacle_off');
-  }
-  async function setUltra(on){
-    if (on && modeObs){
-      cmd('obstacle_off');
-      await new Promise(r => setTimeout(r, 150));
-    }
-    cmd(on ? 'ultra_on' : 'ultra_off');
-  }
+  function setObs(on){ cmd(on ? 'obstacle_on' : 'obstacle_off'); }
+  function setUltra(on){ cmd(on ? 'ultra_on' : 'ultra_off'); }
   $('#btnObs').addEventListener('click', () => setObs(!modeObs));
   $('#btnUltra').addEventListener('click', () => setUltra(!modeUltra));
 
@@ -2384,6 +2562,58 @@ svg.schem{width:100%;height:100%;display:block}
   }
   loadRecs(); setInterval(loadRecs, 6000);
 
+  // ============ Uploaded music (mp3/wav/...) ============
+  async function loadUploads(){
+    try {
+      const r = await fetch('/api/audio/uploads'); const j = await r.json();
+      const box = $('#uploadsList');
+      if (!j.items || j.items.length===0){ box.innerHTML='<div class="audio-empty">— EMPTY —</div>'; return; }
+      box.innerHTML = '';
+      j.items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'audio-item';
+        const kb = (it.size/1024).toFixed(0);
+        row.innerHTML = `<span>▸ ${escapeHtml(it.name)}</span><span class="size">${kb}K  <span style="color:var(--red);margin-left:4px;cursor:pointer" data-del="${escapeHtml(it.name)}">✕</span></span>`;
+        row.querySelector('[data-del]').addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`Delete "${it.name}"?`)) return;
+          await fetch('/api/audio/upload/' + encodeURIComponent(it.name), {method:'DELETE'});
+          loadUploads();
+        });
+        row.addEventListener('click', () => audioApi('/api/audio/play', {name: it.name, src: 'uploads'}));
+        box.appendChild(row);
+      });
+    } catch(e){}
+  }
+  loadUploads(); setInterval(loadUploads, 8000);
+
+  $('#uploadFile').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const r = await fetch('/api/audio/upload', {method:'POST', body: fd});
+      if (r.ok) {
+        loadUploads();
+      } else {
+        const txt = await r.text();
+        alert('upload failed: ' + r.status + ' ' + txt);
+      }
+    } catch(err){ alert('upload error: ' + err.message); }
+  });
+
+  $('#btnClearRecs').addEventListener('click', async () => {
+    if (!confirm('Delete ALL recordings? This cannot be undone.')) return;
+    try {
+      const r = await fetch('/api/recordings', {method:'DELETE'});
+      const j = await r.json();
+      console.log('cleared', j.removed, 'recordings');
+      loadRecs();
+    } catch(e){}
+  });
+
   function formatAgo(d){
     const dt = (Date.now()-d.getTime())/1000;
     if (dt<60) return `${Math.floor(dt)}s`;
@@ -2421,6 +2651,11 @@ svg.schem{width:100%;height:100%;display:block}
     else if (s.last_action && s.last_action !== 'STOP') mode = s.last_action;
     $('#schMode').textContent = `MODE: ${mode}`;
     updateHudMode(em);
+    // ESP32 firmware deadlock banner
+    const banner = document.getElementById('deadlockBanner');
+    if (banner){
+      banner.style.display = s.esp32_deadlock ? 'block' : 'none';
+    }
     if (s.ultra) applyUltra(s.ultra);
   }
 
@@ -2512,6 +2747,35 @@ svg.schem{width:100%;height:100%;display:block}
       if (r.ok) applyMap(await r.json());
     } catch(e){}
   });
+
+  // RTS RESET ESP32 按钮(deadlock banner 上的手动按钮)
+  const btnRtsReset = document.getElementById('btnTryRtsReset');
+  if (btnRtsReset){
+    btnRtsReset.addEventListener('click', async () => {
+      btnRtsReset.disabled = true;
+      btnRtsReset.textContent = '⟳ resetting...';
+      try {
+        const r = await fetch('/api/system/esp32_reset', {method: 'POST'});
+        const j = await r.json();
+        if (r.ok) {
+          btnRtsReset.textContent = '⟳ booting... wait 10s';
+          setTimeout(() => {
+            btnRtsReset.disabled = false;
+            btnRtsReset.textContent = '⟳ RTS RESET';
+          }, 12000);
+        } else {
+          btnRtsReset.textContent = '⟳ failed (' + j.detail + ')';
+          setTimeout(() => {
+            btnRtsReset.disabled = false;
+            btnRtsReset.textContent = '⟳ RTS RESET';
+          }, 5000);
+        }
+      } catch(e) {
+        btnRtsReset.disabled = false;
+        btnRtsReset.textContent = '⟳ RTS RESET';
+      }
+    });
+  }
 
   // RESTART 服务按钮
   $('#btnRestart').addEventListener('click', async () => {
@@ -2644,7 +2908,13 @@ svg.schem{width:100%;height:100%;display:block}
     yoloBtn.classList.toggle('on', yoloEnabled);
     $('#yoloBadge').textContent = yoloEnabled ? 'ON' : 'OFF';
     await yoloPost({enabled: yoloEnabled});
-    if (!yoloEnabled){ renderYoloBoxes([]); $('#yoloStat').textContent = '— ms · 0'; }
+    if (!yoloEnabled){
+      renderYoloBoxes([]);
+      $('#yoloStat').textContent = '— ms · 0';
+      // 防止 await POST 期间残留 WS event 把 bbox 画回去 — 延迟再清一次
+      setTimeout(() => renderYoloBoxes([]), 300);
+      setTimeout(() => renderYoloBoxes([]), 1000);
+    }
   });
   yoloConfSlider.addEventListener('input', e => yoloConfVal.textContent = parseFloat(e.target.value).toFixed(2));
   yoloConfSlider.addEventListener('change', e => yoloPost({conf: parseFloat(e.target.value)}));
