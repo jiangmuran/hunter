@@ -4,7 +4,7 @@ import threading
 import time
 
 from src.api_client import HunterAPI
-from src.perception import CatDetector
+from software.perception import CatDetector
 
 # ── 可调参数 ────────────────────────────────────────────────────────────────
 TURN_THRESHOLD = 0.15   # 猫中心偏离画面中心超过帧宽的 15% → 先旋转对齐
