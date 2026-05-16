@@ -1277,6 +1277,57 @@ async def audio_play(req: Request):
     return {"ok": True}
 
 
+def _amixer_get(control: str, card: str = "Device") -> int | None:
+    """Return mixer control as percent 0-100, or None if not found."""
+    try:
+        import subprocess, re
+        r = subprocess.run(
+            ["amixer", "-c", card, "sget", control],
+            capture_output=True, text=True, timeout=2,
+        )
+        m = re.search(r"\[(\d+)%\]", r.stdout)
+        if m: return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _amixer_set(control: str, percent: int, card: str = "Device") -> bool:
+    percent = max(0, min(100, int(percent)))
+    try:
+        import subprocess
+        subprocess.run(
+            ["amixer", "-c", card, "sset", control, f"{percent}%"],
+            capture_output=True, timeout=2, check=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/audio/volume", tags=["audio"], summary="读 ALSA mixer 音量 (USB Audio Device)",
+         description="返回 speaker / mic 当前百分比。amixer 控制项:Speaker, Mic, Auto Gain Control")
+async def get_volume():
+    return {
+        "speaker": _amixer_get("Speaker"),
+        "mic": _amixer_get("Mic"),
+        "agc": _amixer_get("Auto Gain Control"),
+    }
+
+
+@app.post("/api/audio/volume", tags=["audio"], summary="设 ALSA mixer 音量",
+          description="body 任选字段:`{speaker: 0-100, mic: 0-100, agc: 0|1}`")
+async def set_volume(req: Request):
+    body = await req.json()
+    out = {}
+    for k_in, ctrl in (("speaker", "Speaker"), ("mic", "Mic"), ("agc", "Auto Gain Control")):
+        if k_in in body:
+            ok = _amixer_set(ctrl, body[k_in])
+            out[k_in] = _amixer_get(ctrl) if ok else None
+            push_log(f"vol {k_in} → {out[k_in]}%", "audio")
+    return out
+
+
 @app.post("/api/audio/stop", tags=["audio"], summary="停止当前播放")
 async def audio_stop():
     if audio is None:
@@ -1851,6 +1902,12 @@ svg.schem{width:100%;height:100%;display:block}
       </div>
 
       <div>
+        <div class="sec-label">VOLUME · ALSA MIXER</div>
+        <div class="slider-row"><span class="slider-label">SPK</span><input type="range" id="volSpk" min="0" max="100" step="2" value="50"><span class="slider-val" id="volSpkVal">--%</span></div>
+        <div class="slider-row"><span class="slider-label">MIC</span><input type="range" id="volMic" min="0" max="100" step="2" value="50"><span class="slider-val" id="volMicVal">--%</span></div>
+      </div>
+
+      <div>
         <div class="sec-label">CAT_VOICE · [ 1 / 2 / 3 / 4 ]</div>
         <div class="btn-row btn-4">
           <button class="btn compact" data-action="cat1">CAT_1</button>
@@ -2148,6 +2205,30 @@ svg.schem{width:100%;height:100%;display:block}
   btnRec.addEventListener('touchend', recUp);
   btnRec.addEventListener('touchcancel', recUp);
   $('#btnStopAudio').addEventListener('click', () => audioApi('/api/audio/stop'));
+
+  // ============ Volume sliders ============
+  const volSpk = $('#volSpk'), volSpkVal = $('#volSpkVal');
+  const volMic = $('#volMic'), volMicVal = $('#volMicVal');
+  let volDebounce = null;
+  function volPost(body){
+    clearTimeout(volDebounce);
+    volDebounce = setTimeout(() => {
+      fetch('/api/audio/volume', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }, 150);
+  }
+  volSpk.addEventListener('input', e => volSpkVal.textContent = e.target.value + '%');
+  volSpk.addEventListener('change', e => volPost({speaker: parseInt(e.target.value)}));
+  volMic.addEventListener('input', e => volMicVal.textContent = e.target.value + '%');
+  volMic.addEventListener('change', e => volPost({mic: parseInt(e.target.value)}));
+  // 初始拉
+  fetch('/api/audio/volume').then(r => r.ok ? r.json() : null).then(v => {
+    if (!v) return;
+    if (v.speaker != null){ volSpk.value = v.speaker; volSpkVal.textContent = v.speaker + '%'; }
+    if (v.mic != null){ volMic.value = v.mic; volMicVal.textContent = v.mic + '%'; }
+  }).catch(() => {});
 
   // ============ Recordings list ============
   async function loadRecs(){
