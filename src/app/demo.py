@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 from src.app.config import AppConfig
@@ -97,6 +98,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--include-memory-update", action="store_true")
     parser.add_argument("--product-suite", action="store_true")
     parser.add_argument("--software-mvp-acceptance", action="store_true")
+    parser.add_argument("--web-ui-preview", action="store_true")
+    parser.add_argument("--web-ui-output")
     return parser.parse_args(argv)
 
 
@@ -225,6 +228,8 @@ def run_product_demo_suite(
 
 def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
+    if args.web_ui_preview:
+        return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
         return run_product_demo_suite(verbose=verbose)
     if args.software_mvp_acceptance:
@@ -232,6 +237,23 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     if args.mode == "mock" and args.scenario == "all":
         return run_demo_suite(verbose=verbose, include_memory_update=args.include_memory_update)
     return run_demo_session(argv, verbose=verbose)
+
+
+def run_web_ui_preview_entry(output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
+    from src.app.web_ui import run_web_ui_preview
+
+    html = run_web_ui_preview(verbose=False)
+    result = {"html": html, "output_path": None}
+    if output_path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html, encoding="utf-8")
+        result["output_path"] = str(path)
+        if verbose:
+            print({"web_ui_output": str(path)})
+    elif verbose:
+        print(html)
+    return result
 
 
 def run_demo(argv: list[str] | None = None, verbose: bool = True) -> list[dict]:
