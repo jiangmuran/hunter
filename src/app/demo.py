@@ -4,12 +4,13 @@ import argparse
 from typing import Any
 
 from src.app.config import AppConfig
+from src.app.daily_diary import build_daily_diary_from_sessions
 from src.app.dashboard_preview import build_dashboard_preview
 from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
 from src.app.orchestrator import AppOrchestrator
 from src.app.session_artifact import build_session_artifact
-from src.app.session_memory import memory_preferences, session_memory_update
+from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
 from src.app.session_summary import summarize_session
 from src.software.perception.tracker import CatTracker
@@ -181,6 +182,7 @@ def run_product_demo_suite(
 ) -> dict:
     suite = run_demo_suite(verbose=verbose, include_memory_update=True)
     artifacts = {}
+    memory_updates = []
     for scenario, session in suite["sessions"].items():
         artifact = build_session_artifact(
             session,
@@ -190,6 +192,10 @@ def run_product_demo_suite(
         artifacts[scenario] = artifact
         if store is not None:
             store.save(artifact)
+        if memory_box is not None:
+            applied_update = apply_session_memory_update(session["summary"], memory_box)
+            if applied_update is not None:
+                memory_updates.append(applied_update)
 
     preferences = memory_preferences(memory_box) if memory_box is not None else []
     dashboard_preview = build_dashboard_preview(
@@ -197,9 +203,17 @@ def run_product_demo_suite(
         memory_preferences=preferences,
         milestone=suite["milestone"],
     )
-    product_suite = {**suite, "artifacts": artifacts, "dashboard_preview": dashboard_preview}
+    daily_diary = build_daily_diary_from_sessions(list(artifacts.values()))
+    product_suite = {
+        **suite,
+        "artifacts": artifacts,
+        "dashboard_preview": dashboard_preview,
+        "daily_diary": daily_diary,
+        "memory_updates": memory_updates,
+    }
     if verbose:
         print({"dashboard_preview": dashboard_preview})
+        print({"daily_diary": daily_diary})
     return product_suite
 
 
@@ -212,6 +226,28 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
 
 def run_demo(argv: list[str] | None = None, verbose: bool = True) -> list[dict]:
     return run_demo_session(argv, verbose)["states"]
+
+
+def run_software_mvp_acceptance(verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=verbose)
+    milestone = product_suite["milestone"]
+    acceptance = {
+        "name": "software_mvp_acceptance",
+        "ready_for_hardware_integration": milestone["complete"],
+        "total_sessions": product_suite["dashboard_preview"]["total_sessions"],
+        "outcome_counts": product_suite["outcome_counts"],
+        "capabilities": [
+            *milestone["completed_capabilities"],
+            "session artifacts",
+            "dashboard_preview",
+            "daily_diary",
+            "memory update adapter",
+        ],
+        "remaining_for_real_mvp": milestone["next_phase"],
+    }
+    if verbose:
+        print({"software_mvp_acceptance": acceptance})
+    return acceptance
 
 
 if __name__ == "__main__":

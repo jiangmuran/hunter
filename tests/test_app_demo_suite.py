@@ -70,6 +70,44 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertEqual(len(store.saved), 8)
         self.assertTrue(first_ids.isdisjoint(second_ids))
 
+    def test_run_product_demo_suite_includes_daily_diary_preview(self):
+        from src.app.demo import run_product_demo_suite
+
+        result = run_product_demo_suite(verbose=False)
+
+        self.assertIn("daily_diary", result)
+        self.assertEqual(result["daily_diary"]["stats"]["total_sessions"], 4)
+        self.assertIn("text", result["daily_diary"])
+
+    def test_run_product_demo_suite_applies_memory_updates_when_memory_box_provided(self):
+        from src.app.demo import run_product_demo_suite
+
+        memory_box = FakeMemoryBox()
+
+        result = run_product_demo_suite(verbose=False, memory_box=memory_box)
+
+        self.assertEqual(memory_box.updates, [
+            ("laser_escape", 1),
+            ("wand_hover", 0),
+            ("wand_slow", 0),
+        ])
+        self.assertEqual(result["memory_updates"], [
+            {"app_arm": "approach", "memory_arm": "laser_escape", "reward": 1, "reason": "reached_stop_distance"},
+            {"app_arm": "track_target", "memory_arm": "wand_hover", "reward": 0, "reason": "lost_target"},
+            {"app_arm": "safe_stop", "memory_arm": "wand_slow", "reward": 0, "reason": "error"},
+        ])
+
+    def test_run_software_mvp_acceptance_returns_ready_summary(self):
+        from src.app.demo import run_software_mvp_acceptance
+
+        result = run_software_mvp_acceptance(verbose=False)
+
+        self.assertTrue(result["ready_for_hardware_integration"])
+        self.assertEqual(result["total_sessions"], 4)
+        self.assertIn("dashboard_preview", result["capabilities"])
+        self.assertIn("daily_diary", result["capabilities"])
+        self.assertIn("real robot closed loop", result["remaining_for_real_mvp"])
+
 
 class FakeStore:
     def __init__(self):
@@ -78,6 +116,17 @@ class FakeStore:
     def save(self, artifact):
         self.saved.append(artifact)
         return artifact
+
+
+class FakeMemoryBox:
+    def __init__(self):
+        self.updates = []
+
+    def update(self, arm, reward):
+        self.updates.append((arm, reward))
+
+    def top_preferences(self, limit):
+        return self.updates[:limit]
 
 
 if __name__ == "__main__":
