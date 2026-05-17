@@ -70,6 +70,15 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertEqual(len(store.saved), 8)
         self.assertTrue(first_ids.isdisjoint(second_ids))
 
+    def test_run_product_demo_suite_includes_daily_diary_preview(self):
+        from src.app.demo import run_product_demo_suite
+
+        result = run_product_demo_suite(verbose=False)
+
+        self.assertIn("daily_diary", result)
+        self.assertEqual(result["daily_diary"]["stats"]["total_sessions"], 4)
+        self.assertIn("text", result["daily_diary"])
+
 
 class FakeStore:
     def __init__(self):

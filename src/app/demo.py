@@ -4,6 +4,7 @@ import argparse
 from typing import Any
 
 from src.app.config import AppConfig
+from src.app.daily_diary import build_daily_diary_from_sessions
 from src.app.dashboard_preview import build_dashboard_preview
 from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
@@ -197,9 +198,11 @@ def run_product_demo_suite(
         memory_preferences=preferences,
         milestone=suite["milestone"],
     )
-    product_suite = {**suite, "artifacts": artifacts, "dashboard_preview": dashboard_preview}
+    daily_diary = build_daily_diary_from_sessions(list(artifacts.values()))
+    product_suite = {**suite, "artifacts": artifacts, "dashboard_preview": dashboard_preview, "daily_diary": daily_diary}
     if verbose:
         print({"dashboard_preview": dashboard_preview})
+        print({"daily_diary": daily_diary})
     return product_suite
 
 
