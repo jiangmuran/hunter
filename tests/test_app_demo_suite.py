@@ -142,6 +142,27 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertIn("daily_diary", result)
         self.assertIn("personalization_preview", result)
 
+
+    def test_cli_web_ui_preview_returns_html(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--web-ui-preview"], verbose=False)
+
+        self.assertIn("<html", result["html"])
+        self.assertIn("Hunter Software MVP", result["html"])
+
+    def test_cli_web_ui_preview_writes_output_file(self):
+        import tempfile
+        from pathlib import Path
+        from src.app.demo import run_demo_entry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "hunter_web_ui.html"
+            result = run_demo_entry(["--web-ui-preview", "--web-ui-output", str(output_path)], verbose=False)
+
+            self.assertEqual(result["output_path"], str(output_path))
+            self.assertIn("Hunter Software MVP", output_path.read_text(encoding="utf-8"))
+
     def test_cli_software_mvp_acceptance_runs_acceptance_summary(self):
         from src.app.demo import run_demo_entry
 

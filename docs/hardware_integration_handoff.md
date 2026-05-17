@@ -12,6 +12,8 @@
 - daily diary：按 session artifact 聚合日报，支持模板输出和可插拔 LLM 函数。
 - memory loop：session 结果可写入 MemoryBox。
 - personalization：根据 MemoryBox 偏好推荐下一次玩法 arm。
+- Web UI preview：可生成本地 HTML 页面，展示 dashboard、diary、personalization、acceptance 和 mock sessions。
+- LLM config：通过环境变量声明 provider / model / API key 位置，真实密钥不写入代码仓库。
 - software MVP acceptance：一条入口输出软件侧是否 ready for hardware integration。
 
 ## 软件侧怎么跑
@@ -46,7 +48,28 @@ python -m src.app.demo --software-mvp-acceptance
 - 真实 MVP 还剩哪些硬件集成项。
 - 当前 personalization 推荐状态。
 
-### 4. 跑真实硬件模式入口
+### 4. 生成本地 Web UI 预览
+
+```bash
+python -m src.app.demo --web-ui-preview --web-ui-output hunter_web_ui.html
+```
+
+这会生成一个可直接用浏览器打开的 HTML 页面，展示当前软件 MVP 的 dashboard、daily diary、personalization、acceptance 和 mock session 表格。这个 Web UI 当前是软件侧预览页，不会向真实硬件发送运动命令。
+
+### 5. LLM 配置入口
+
+当前日报默认使用本地模板；如果要接真实 LLM，运行环境通过这些环境变量配置：
+
+```bash
+export HUNTER_LLM_PROVIDER=anthropic
+export HUNTER_LLM_MODEL=claude-sonnet-4-6
+export HUNTER_LLM_API_KEY_ENV=ANTHROPIC_API_KEY
+export ANTHROPIC_API_KEY=<your-key>
+```
+
+密钥只放在本机 shell 或部署环境里，不写入仓库。代码层入口仍是 `daily_diary` 的 `llm_fn(prompt) -> str`，配置模块负责说明运行时应使用哪个 provider/model/key。
+
+### 6. 跑真实硬件模式入口
 
 ```bash
 python -m src.app.demo --mode real --base-url http://<robot-host>:<port> --ticks 10
