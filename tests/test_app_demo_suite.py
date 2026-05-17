@@ -133,6 +133,22 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertEqual(result["recommended_arm"], "laser_escape")
         self.assertEqual(result["source"], "memory")
         self.assertEqual(result["memory_updates"], 3)
+    def test_cli_product_suite_runs_product_preview(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--product-suite"], verbose=False)
+
+        self.assertIn("dashboard_preview", result)
+        self.assertIn("daily_diary", result)
+        self.assertIn("personalization_preview", result)
+
+    def test_cli_software_mvp_acceptance_runs_acceptance_summary(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--software-mvp-acceptance"], verbose=False)
+
+        self.assertTrue(result["ready_for_hardware_integration"])
+        self.assertIn("remaining_for_real_mvp", result)
 
 
 class FakeStore:

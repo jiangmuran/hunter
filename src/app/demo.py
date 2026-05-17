@@ -95,6 +95,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticks", type=int, default=10)
     parser.add_argument("--scenario", choices=["empty", "approach", "lost_target", "error", "all"], default="empty")
     parser.add_argument("--include-memory-update", action="store_true")
+    parser.add_argument("--product-suite", action="store_true")
+    parser.add_argument("--software-mvp-acceptance", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -223,6 +225,10 @@ def run_product_demo_suite(
 
 def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
+    if args.product_suite:
+        return run_product_demo_suite(verbose=verbose)
+    if args.software_mvp_acceptance:
+        return run_software_mvp_acceptance(verbose=verbose)
     if args.mode == "mock" and args.scenario == "all":
         return run_demo_suite(verbose=verbose, include_memory_update=args.include_memory_update)
     return run_demo_session(argv, verbose=verbose)
