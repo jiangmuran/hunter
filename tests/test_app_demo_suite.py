@@ -95,6 +95,16 @@ class DemoSuiteTest(unittest.TestCase):
             {"app_arm": "track_target", "memory_arm": "wand_hover", "reward": 0, "reason": "lost_target"},
             {"app_arm": "safe_stop", "memory_arm": "wand_slow", "reward": 0, "reason": "error"},
         ])
+    def test_run_software_mvp_acceptance_returns_ready_summary(self):
+        from src.app.demo import run_software_mvp_acceptance
+
+        result = run_software_mvp_acceptance(verbose=False)
+
+        self.assertTrue(result["ready_for_hardware_integration"])
+        self.assertEqual(result["total_sessions"], 4)
+        self.assertIn("dashboard_preview", result["capabilities"])
+        self.assertIn("daily_diary", result["capabilities"])
+        self.assertIn("real robot closed loop", result["remaining_for_real_mvp"])
 
 
 class FakeStore:

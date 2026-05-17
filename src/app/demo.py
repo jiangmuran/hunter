@@ -228,5 +228,27 @@ def run_demo(argv: list[str] | None = None, verbose: bool = True) -> list[dict]:
     return run_demo_session(argv, verbose)["states"]
 
 
+def run_software_mvp_acceptance(verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=verbose)
+    milestone = product_suite["milestone"]
+    acceptance = {
+        "name": "software_mvp_acceptance",
+        "ready_for_hardware_integration": milestone["complete"],
+        "total_sessions": product_suite["dashboard_preview"]["total_sessions"],
+        "outcome_counts": product_suite["outcome_counts"],
+        "capabilities": [
+            *milestone["completed_capabilities"],
+            "session artifacts",
+            "dashboard_preview",
+            "daily_diary",
+            "memory update adapter",
+        ],
+        "remaining_for_real_mvp": milestone["next_phase"],
+    }
+    if verbose:
+        print({"software_mvp_acceptance": acceptance})
+    return acceptance
+
+
 if __name__ == "__main__":
     run_demo_entry(verbose=True)
