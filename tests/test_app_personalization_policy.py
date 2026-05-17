@@ -52,6 +52,15 @@ class PersonalizationPolicyTest(unittest.TestCase):
             {"arm": "laser_escape", "expected_reward": 0.8},
             {"arm": "wand_hover", "expected_reward": 0.6},
         ])
+    def test_build_personalization_preview_includes_summary_text(self):
+        from src.app.personalization_policy import build_personalization_preview
+
+        preview = build_personalization_preview(FakeMemoryBox([
+            ("laser_escape", 0.8),
+        ]))
+
+        self.assertIn("laser_escape", preview["summary"])
+        self.assertIn("历史偏好", preview["summary"])
 
 
 class FakeMemoryBox:

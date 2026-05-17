@@ -36,4 +36,11 @@ def build_personalization_preview(
         "source": recommendation["source"],
         "expected_reward": recommendation["expected_reward"],
         "preferences": preferences,
+        "summary": _summary_text(recommendation),
     }
+
+
+def _summary_text(recommendation: dict[str, Any]) -> str:
+    if recommendation["source"] == "memory":
+        return f"根据历史偏好，下一次推荐玩法：{recommendation['arm']}。"
+    return f"暂无稳定历史偏好，下一次使用默认玩法：{recommendation['arm']}。"
