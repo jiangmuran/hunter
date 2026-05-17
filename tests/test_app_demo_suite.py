@@ -78,6 +78,7 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertIn("daily_diary", result)
         self.assertEqual(result["daily_diary"]["stats"]["total_sessions"], 4)
         self.assertIn("text", result["daily_diary"])
+
     def test_run_product_demo_suite_applies_memory_updates_when_memory_box_provided(self):
         from src.app.demo import run_product_demo_suite
 
@@ -95,6 +96,7 @@ class DemoSuiteTest(unittest.TestCase):
             {"app_arm": "track_target", "memory_arm": "wand_hover", "reward": 0, "reason": "lost_target"},
             {"app_arm": "safe_stop", "memory_arm": "wand_slow", "reward": 0, "reason": "error"},
         ])
+
     def test_run_software_mvp_acceptance_returns_ready_summary(self):
         from src.app.demo import run_software_mvp_acceptance
 
