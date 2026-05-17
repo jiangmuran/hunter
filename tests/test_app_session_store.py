@@ -42,6 +42,20 @@ class SessionStoreTest(unittest.TestCase):
             self.assertEqual(overview["outcome_counts"], {"success": 1, "lost_target": 1})
             self.assertEqual(overview["command_totals"], {"forward": 1, "stop": 3})
 
+    def test_store_replaces_existing_session_id(self):
+        from src.app.session_store import SessionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions.jsonl")
+            store.save(_artifact("same", "no_target", {"stop": 1}, ended_at="2026-05-16T10:00:00Z"))
+            replacement = _artifact("same", "success", {"forward": 1}, ended_at="2026-05-16T10:01:00Z")
+
+            store.save(replacement)
+
+            self.assertEqual(store.get("same"), replacement)
+            self.assertEqual(store.overview()["total_sessions"], 1)
+            self.assertEqual(store.overview()["outcome_counts"], {"success": 1})
+
     def test_store_handles_empty_history(self):
         from src.app.session_store import SessionStore
 

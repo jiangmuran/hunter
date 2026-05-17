@@ -122,6 +122,8 @@ def build_orchestrator(
 
 def run_demo_session(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
+    if args.scenario == "all":
+        raise ValueError("run_demo_session only runs one scenario; use run_demo_entry or run_demo_suite for 'all'")
     orchestrator = build_orchestrator(
         mode=args.mode,
         base_url=args.base_url,

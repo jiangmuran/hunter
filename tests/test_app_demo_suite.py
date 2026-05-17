@@ -35,6 +35,13 @@ class DemoSuiteTest(unittest.TestCase):
 
         self.assertIn("sessions", result)
         self.assertEqual(result["sessions"]["approach"]["summary"]["final_state"], "at_stop_distance")
+
+    def test_run_demo_rejects_all_scenario_with_clear_error(self):
+        from src.app.demo import run_demo
+
+        with self.assertRaises(ValueError):
+            run_demo(["--mode", "mock", "--scenario", "all"], verbose=False)
+
     def test_run_product_demo_suite_returns_artifacts_and_dashboard_preview(self):
         from src.app.demo import run_product_demo_suite
 

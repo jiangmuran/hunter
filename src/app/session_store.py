@@ -12,8 +12,11 @@ class SessionStore:
 
     def save(self, artifact: dict[str, Any]) -> dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(artifact, ensure_ascii=False, sort_keys=True) + "\n")
+        artifacts = [existing for existing in self._load_all() if existing.get("id") != artifact.get("id")]
+        artifacts.append(artifact)
+        with self.path.open("w", encoding="utf-8") as file:
+            for saved_artifact in artifacts:
+                file.write(json.dumps(saved_artifact, ensure_ascii=False, sort_keys=True) + "\n")
         return artifact
 
     def get(self, session_id: str) -> dict[str, Any] | None:
