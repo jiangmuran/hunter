@@ -186,7 +186,6 @@ def run_product_demo_suite(
             session,
             mode="mock",
             scenario=scenario,
-            session_id=f"mock-{scenario}",
         )
         artifacts[scenario] = artifact
         if store is not None:

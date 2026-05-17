@@ -57,15 +57,18 @@ class DemoSuiteTest(unittest.TestCase):
             "error": 1,
         })
 
-    def test_run_product_demo_suite_can_persist_artifacts_when_store_provided(self):
+    def test_run_product_demo_suite_preserves_history_across_runs(self):
         from src.app.demo import run_product_demo_suite
 
         store = FakeStore()
 
-        result = run_product_demo_suite(verbose=False, store=store)
+        first = run_product_demo_suite(verbose=False, store=store)
+        second = run_product_demo_suite(verbose=False, store=store)
 
-        self.assertEqual(len(store.saved), 4)
-        self.assertEqual(set(result["artifacts"]), {artifact["scenario"] for artifact in store.saved})
+        first_ids = {artifact["id"] for artifact in first["artifacts"].values()}
+        second_ids = {artifact["id"] for artifact in second["artifacts"].values()}
+        self.assertEqual(len(store.saved), 8)
+        self.assertTrue(first_ids.isdisjoint(second_ids))
 
 
 class FakeStore:
