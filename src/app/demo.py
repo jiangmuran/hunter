@@ -256,5 +256,20 @@ def run_software_mvp_acceptance(verbose: bool = True) -> dict[str, Any]:
     return acceptance
 
 
+def run_personalized_demo_acceptance(memory_box: Any, verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=verbose, memory_box=memory_box)
+    personalization = product_suite["personalization_preview"]
+    acceptance = {
+        "recommended_arm": personalization["recommended_arm"],
+        "source": personalization["source"],
+        "expected_reward": personalization["expected_reward"],
+        "memory_updates": len(product_suite["memory_updates"]),
+        "preferences": personalization["preferences"],
+    }
+    if verbose:
+        print({"personalized_demo_acceptance": acceptance})
+    return acceptance
+
+
 if __name__ == "__main__":
     run_demo_entry(verbose=True)

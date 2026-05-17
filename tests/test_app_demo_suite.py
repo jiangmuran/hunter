@@ -125,6 +125,14 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertEqual(result["personalization"]["recommended_arm"], "wand_slow")
         self.assertEqual(result["personalization"]["source"], "default")
         self.assertIn("personalization_policy", result["capabilities"])
+    def test_run_personalized_demo_acceptance_learns_from_suite(self):
+        from src.app.demo import run_personalized_demo_acceptance
+
+        result = run_personalized_demo_acceptance(verbose=False, memory_box=FakeLearningMemoryBox())
+
+        self.assertEqual(result["recommended_arm"], "laser_escape")
+        self.assertEqual(result["source"], "memory")
+        self.assertEqual(result["memory_updates"], 3)
 
 
 class FakeStore:
@@ -148,6 +156,23 @@ class FakeMemoryBox:
         if self.preferences:
             return self.preferences[:limit]
         return self.updates[:limit]
+
+
+class FakeLearningMemoryBox:
+    def __init__(self):
+        self.totals = {}
+        self.counts = {}
+
+    def update(self, arm, reward):
+        self.totals[arm] = self.totals.get(arm, 0) + reward
+        self.counts[arm] = self.counts.get(arm, 0) + 1
+
+    def top_preferences(self, limit):
+        preferences = [
+            (arm, self.totals[arm] / self.counts[arm])
+            for arm in self.totals
+        ]
+        return sorted(preferences, key=lambda item: item[1], reverse=True)[:limit]
 
 
 if __name__ == "__main__":
