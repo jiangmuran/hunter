@@ -117,6 +117,14 @@ class DemoSuiteTest(unittest.TestCase):
 
         self.assertEqual(result["personalization_preview"]["recommended_arm"], "laser_escape")
         self.assertEqual(result["personalization_preview"]["source"], "memory")
+    def test_run_software_mvp_acceptance_includes_personalization_readiness(self):
+        from src.app.demo import run_software_mvp_acceptance
+
+        result = run_software_mvp_acceptance(verbose=False)
+
+        self.assertEqual(result["personalization"]["recommended_arm"], "wand_slow")
+        self.assertEqual(result["personalization"]["source"], "default")
+        self.assertIn("personalization_policy", result["capabilities"])
 
 
 class FakeStore:

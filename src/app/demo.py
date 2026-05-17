@@ -246,7 +246,9 @@ def run_software_mvp_acceptance(verbose: bool = True) -> dict[str, Any]:
             "dashboard_preview",
             "daily_diary",
             "memory update adapter",
+            "personalization_policy",
         ],
+        "personalization": product_suite["personalization_preview"],
         "remaining_for_real_mvp": milestone["next_phase"],
     }
     if verbose:
