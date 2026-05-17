@@ -107,6 +107,16 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertIn("dashboard_preview", result["capabilities"])
         self.assertIn("daily_diary", result["capabilities"])
         self.assertIn("real robot closed loop", result["remaining_for_real_mvp"])
+    def test_run_product_demo_suite_includes_personalization_preview(self):
+        from src.app.demo import run_product_demo_suite
+
+        memory_box = FakeMemoryBox()
+        memory_box.preferences = [("laser_escape", 0.9)]
+
+        result = run_product_demo_suite(verbose=False, memory_box=memory_box)
+
+        self.assertEqual(result["personalization_preview"]["recommended_arm"], "laser_escape")
+        self.assertEqual(result["personalization_preview"]["source"], "memory")
 
 
 class FakeStore:
@@ -121,11 +131,14 @@ class FakeStore:
 class FakeMemoryBox:
     def __init__(self):
         self.updates = []
+        self.preferences = []
 
     def update(self, arm, reward):
         self.updates.append((arm, reward))
 
     def top_preferences(self, limit):
+        if self.preferences:
+            return self.preferences[:limit]
         return self.updates[:limit]
 
 
