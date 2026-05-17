@@ -10,7 +10,7 @@ from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
 from src.app.orchestrator import AppOrchestrator
 from src.app.session_artifact import build_session_artifact
-from src.app.session_memory import memory_preferences, session_memory_update
+from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
 from src.app.session_summary import summarize_session
 from src.software.perception.tracker import CatTracker
@@ -182,6 +182,7 @@ def run_product_demo_suite(
 ) -> dict:
     suite = run_demo_suite(verbose=verbose, include_memory_update=True)
     artifacts = {}
+    memory_updates = []
     for scenario, session in suite["sessions"].items():
         artifact = build_session_artifact(
             session,
@@ -191,6 +192,10 @@ def run_product_demo_suite(
         artifacts[scenario] = artifact
         if store is not None:
             store.save(artifact)
+        if memory_box is not None:
+            applied_update = apply_session_memory_update(session["summary"], memory_box)
+            if applied_update is not None:
+                memory_updates.append(applied_update)
 
     preferences = memory_preferences(memory_box) if memory_box is not None else []
     dashboard_preview = build_dashboard_preview(
@@ -199,7 +204,13 @@ def run_product_demo_suite(
         milestone=suite["milestone"],
     )
     daily_diary = build_daily_diary_from_sessions(list(artifacts.values()))
-    product_suite = {**suite, "artifacts": artifacts, "dashboard_preview": dashboard_preview, "daily_diary": daily_diary}
+    product_suite = {
+        **suite,
+        "artifacts": artifacts,
+        "dashboard_preview": dashboard_preview,
+        "daily_diary": daily_diary,
+        "memory_updates": memory_updates,
+    }
     if verbose:
         print({"dashboard_preview": dashboard_preview})
         print({"daily_diary": daily_diary})

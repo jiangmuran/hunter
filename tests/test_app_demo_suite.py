@@ -78,6 +78,23 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertIn("daily_diary", result)
         self.assertEqual(result["daily_diary"]["stats"]["total_sessions"], 4)
         self.assertIn("text", result["daily_diary"])
+    def test_run_product_demo_suite_applies_memory_updates_when_memory_box_provided(self):
+        from src.app.demo import run_product_demo_suite
+
+        memory_box = FakeMemoryBox()
+
+        result = run_product_demo_suite(verbose=False, memory_box=memory_box)
+
+        self.assertEqual(memory_box.updates, [
+            ("laser_escape", 1),
+            ("wand_hover", 0),
+            ("wand_slow", 0),
+        ])
+        self.assertEqual(result["memory_updates"], [
+            {"app_arm": "approach", "memory_arm": "laser_escape", "reward": 1, "reason": "reached_stop_distance"},
+            {"app_arm": "track_target", "memory_arm": "wand_hover", "reward": 0, "reason": "lost_target"},
+            {"app_arm": "safe_stop", "memory_arm": "wand_slow", "reward": 0, "reason": "error"},
+        ])
 
 
 class FakeStore:
@@ -87,6 +104,17 @@ class FakeStore:
     def save(self, artifact):
         self.saved.append(artifact)
         return artifact
+
+
+class FakeMemoryBox:
+    def __init__(self):
+        self.updates = []
+
+    def update(self, arm, reward):
+        self.updates.append((arm, reward))
+
+    def top_preferences(self, limit):
+        return self.updates[:limit]
 
 
 if __name__ == "__main__":
