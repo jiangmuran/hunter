@@ -107,6 +107,32 @@ class DemoSuiteTest(unittest.TestCase):
         self.assertIn("dashboard_preview", result["capabilities"])
         self.assertIn("daily_diary", result["capabilities"])
         self.assertIn("real robot closed loop", result["remaining_for_real_mvp"])
+    def test_run_product_demo_suite_includes_personalization_preview(self):
+        from src.app.demo import run_product_demo_suite
+
+        memory_box = FakeMemoryBox()
+        memory_box.preferences = [("laser_escape", 0.9)]
+
+        result = run_product_demo_suite(verbose=False, memory_box=memory_box)
+
+        self.assertEqual(result["personalization_preview"]["recommended_arm"], "laser_escape")
+        self.assertEqual(result["personalization_preview"]["source"], "memory")
+    def test_run_software_mvp_acceptance_includes_personalization_readiness(self):
+        from src.app.demo import run_software_mvp_acceptance
+
+        result = run_software_mvp_acceptance(verbose=False)
+
+        self.assertEqual(result["personalization"]["recommended_arm"], "wand_slow")
+        self.assertEqual(result["personalization"]["source"], "default")
+        self.assertIn("personalization_policy", result["capabilities"])
+    def test_run_personalized_demo_acceptance_learns_from_suite(self):
+        from src.app.demo import run_personalized_demo_acceptance
+
+        result = run_personalized_demo_acceptance(verbose=False, memory_box=FakeLearningMemoryBox())
+
+        self.assertEqual(result["recommended_arm"], "laser_escape")
+        self.assertEqual(result["source"], "memory")
+        self.assertEqual(result["memory_updates"], 3)
 
 
 class FakeStore:
@@ -121,12 +147,32 @@ class FakeStore:
 class FakeMemoryBox:
     def __init__(self):
         self.updates = []
+        self.preferences = []
 
     def update(self, arm, reward):
         self.updates.append((arm, reward))
 
     def top_preferences(self, limit):
+        if self.preferences:
+            return self.preferences[:limit]
         return self.updates[:limit]
+
+
+class FakeLearningMemoryBox:
+    def __init__(self):
+        self.totals = {}
+        self.counts = {}
+
+    def update(self, arm, reward):
+        self.totals[arm] = self.totals.get(arm, 0) + reward
+        self.counts[arm] = self.counts.get(arm, 0) + 1
+
+    def top_preferences(self, limit):
+        preferences = [
+            (arm, self.totals[arm] / self.counts[arm])
+            for arm in self.totals
+        ]
+        return sorted(preferences, key=lambda item: item[1], reverse=True)[:limit]
 
 
 if __name__ == "__main__":

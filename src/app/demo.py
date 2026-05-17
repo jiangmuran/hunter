@@ -9,6 +9,7 @@ from src.app.dashboard_preview import build_dashboard_preview
 from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
 from src.app.orchestrator import AppOrchestrator
+from src.app.personalization_policy import build_personalization_preview
 from src.app.session_artifact import build_session_artifact
 from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
@@ -204,16 +205,19 @@ def run_product_demo_suite(
         milestone=suite["milestone"],
     )
     daily_diary = build_daily_diary_from_sessions(list(artifacts.values()))
+    personalization_preview = build_personalization_preview(memory_box)
     product_suite = {
         **suite,
         "artifacts": artifacts,
         "dashboard_preview": dashboard_preview,
         "daily_diary": daily_diary,
         "memory_updates": memory_updates,
+        "personalization_preview": personalization_preview,
     }
     if verbose:
         print({"dashboard_preview": dashboard_preview})
         print({"daily_diary": daily_diary})
+        print({"personalization_preview": personalization_preview})
     return product_suite
 
 
@@ -242,11 +246,28 @@ def run_software_mvp_acceptance(verbose: bool = True) -> dict[str, Any]:
             "dashboard_preview",
             "daily_diary",
             "memory update adapter",
+            "personalization_policy",
         ],
+        "personalization": product_suite["personalization_preview"],
         "remaining_for_real_mvp": milestone["next_phase"],
     }
     if verbose:
         print({"software_mvp_acceptance": acceptance})
+    return acceptance
+
+
+def run_personalized_demo_acceptance(memory_box: Any, verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=verbose, memory_box=memory_box)
+    personalization = product_suite["personalization_preview"]
+    acceptance = {
+        "recommended_arm": personalization["recommended_arm"],
+        "source": personalization["source"],
+        "expected_reward": personalization["expected_reward"],
+        "memory_updates": len(product_suite["memory_updates"]),
+        "preferences": personalization["preferences"],
+    }
+    if verbose:
+        print({"personalized_demo_acceptance": acceptance})
     return acceptance
 
 
