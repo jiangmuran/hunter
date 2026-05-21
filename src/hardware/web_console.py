@@ -4564,8 +4564,10 @@ svg.schem{width:100%;height:100%;display:block}
       }
       if (s.present_positions_deg){
         const grid = $('#armJointGrid');
-        if (grid && !grid.dataset.built){
-          grid.dataset.built = '1';
+        // joint 数量变化时(servo 上下线、reset)强制 rebuild
+        const curNames = Object.keys(s.present_positions_deg).join(',');
+        if (grid && grid.dataset.builtFor !== curNames){
+          grid.dataset.builtFor = curNames;
           let html = '';
           const metaMap = window.armMetaMap || {};
           for (const name of Object.keys(s.present_positions_deg)){
