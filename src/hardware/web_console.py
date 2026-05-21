@@ -1203,17 +1203,43 @@ async def lifespan(app: FastAPI):
         push_log(f"boot: audio FAILED: {e}", "sys")
         audio = None
 
-    push_log("boot: initializing Camera", "sys")
-    try:
-        camera = CameraStreamer(device=0, width=640, height=480, fps=12, quality=65)
-        if camera.start():
-            push_log("boot: camera ready (640x480@20)", "sys")
-        else:
-            push_log(f"boot: camera FAILED: {camera.error}", "sys")
-            camera = None
-    except Exception as e:
-        push_log(f"boot: camera FAILED: {e}", "sys")
-        camera = None
+    push_log("boot: initializing Cameras (multi)", "sys")
+    # 多 cam:依次 probe /dev/video0..9 找能 open + 1280x720 MJPG 的 USB UVC 设备,
+    # 按 enum 顺序赋 id a/b/c...。挂掉的 cam 在 cameras dict 里值为 None。
+    cameras = {}
+    cam_ids = []
+    probe_paths = [f"/dev/video{i}" for i in range(0, 10)]
+    for path in probe_paths:
+        if not os.path.exists(path): continue
+        # 跳过 RPi 自带 ISP 节点(只关心 USB UVC,/dev/video0 通常是 USB)
+        if any(p in path for p in []): continue
+        # 简单 probe:试着 open + 读一帧;成功就当成可用 cam
+        try:
+            test_cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+            ok = test_cap.isOpened() and test_cap.read()[0]
+            test_cap.release()
+            if not ok: continue
+        except Exception: continue
+        cid = chr(ord('a') + len(cam_ids))
+        cam_ids.append(cid)
+        try:
+            cs = CameraStreamer(device=path, width=640, height=480, fps=12, quality=65)
+            if cs.start():
+                cameras[cid] = cs
+                push_log(f"boot: cam_{cid} ready ({path} 640x480@12)", "sys")
+            else:
+                push_log(f"boot: cam_{cid} FAILED ({path}): {cs.error}", "sys")
+                cameras[cid] = None
+        except Exception as e:
+            push_log(f"boot: cam_{cid} FAILED ({path}): {e}", "sys")
+            cameras[cid] = None
+        if len(cam_ids) >= 4: break
+    # 主 cam alias:默认第一个 alive
+    app.state.cameras = cameras
+    app.state.main_cam_id = next((i for i in cam_ids if cameras.get(i)), None)
+    camera = cameras.get(app.state.main_cam_id) if app.state.main_cam_id else None
+    if camera is None:
+        push_log("boot: no camera detected", "sys")
 
     push_log("boot: initializing YOLO", "sys")
     if not _yolo_ok:
@@ -1403,7 +1429,8 @@ async def lifespan(app: FastAPI):
     if arm is not None:
         try: arm.disconnect()
         except Exception: pass
-    for obj, name in [(car, "car"), (audio, "audio"), (camera, "camera"), (yolo, "yolo"), (minimap, "minimap")]:
+    cam_close_list = [(cs, f"cam_{cid}") for cid, cs in (getattr(app.state, "cameras", {}) or {}).items() if cs]
+    for obj, name in [(car, "car"), (audio, "audio")] + cam_close_list + [(yolo, "yolo"), (minimap, "minimap")]:
         if obj is None: continue
         t = threading.Thread(target=_safe_close, args=(obj, name), daemon=True)
         t.start()
@@ -1653,13 +1680,20 @@ async def health():
     audio_ok = audio is not None
     audio_detail = audio.audio_device if audio else "—"
 
-    # camera
-    cam_ok = camera is not None and camera.is_alive()
-    cam_detail = f"/dev/video{camera.device} · {camera.width}x{camera.height}" if camera else "—"
-    cam_fps = round(camera.fps(), 1) if camera else 0.0
+    # camera(多 cam:health 报"主"信息;详细每 cam 走 /api/camera/list)
+    cams_d = getattr(app.state, "cameras", {}) or {}
+    main_id = getattr(app.state, "main_cam_id", None)
+    alive_ids = [cid for cid, cs in cams_d.items() if cs and cs.is_alive()]
+    cam_ok = bool(alive_ids)
+    if cams_d:
+        cam_detail = f"main={main_id or '—'} · alive=[{','.join(alive_ids) or 'none'}]/{len(cams_d)}"
+    else:
+        cam_detail = "—"
+    main_cam = cams_d.get(main_id) if main_id else None
+    cam_fps = round(main_cam.fps(), 1) if main_cam else 0.0
     cam_age = None
-    if camera and camera.last_frame_t:
-        cam_age = int((time.time() - camera.last_frame_t) * 1000)
+    if main_cam and main_cam.last_frame_t:
+        cam_age = int((time.time() - main_cam.last_frame_t) * 1000)
 
     # system
     cpu_temp = _cpu_temp_c()
@@ -2183,14 +2217,22 @@ async def audio_stop():
 
 # ====================== Camera stream ======================
 
-async def mjpeg_generator():
+def _get_cam(cid: str | None = None):
+    """cid=None 走 main_cam alias。"""
+    cams = getattr(app.state, "cameras", {}) or {}
+    if cid is None: cid = getattr(app.state, "main_cam_id", None)
+    return cams.get(cid) if cid else None
+
+
+async def mjpeg_generator(cid: str | None = None):
     boundary = b"--frame\r\n"
     last_t = 0.0
     while True:
-        if camera is None:
+        cam = _get_cam(cid)
+        if cam is None:
             await asyncio.sleep(0.5)
             continue
-        jpeg, t = camera.get_jpeg()
+        jpeg, t = cam.get_jpeg()
         if jpeg is None or t == last_t:
             await asyncio.sleep(0.03)
             continue
@@ -2202,27 +2244,79 @@ async def mjpeg_generator():
         yield chunk
 
 
-@app.get("/api/camera/stream.mjpg", tags=["camera"], summary="MJPEG 摄像头流",
-         description="multipart/x-mixed-replace 推送实时 JPEG 帧。浏览器 `<img src>` 直接显示;Python 用 `requests` 流式读取分段")
+@app.get("/api/camera/stream.mjpg", tags=["camera"], summary="MJPEG 主摄像头流 (兼容)",
+         description="multipart/x-mixed-replace 推送主 cam 的实时 JPEG。指定具体 cam 用 `/api/camera/{cam_id}/stream.mjpg`(cam_id 为 a/b/c...)。")
 async def camera_stream():
-    if camera is None:
-        raise HTTPException(503, "camera not ready")
+    if _get_cam() is None: raise HTTPException(503, "main camera not ready")
     return StreamingResponse(
-        mjpeg_generator(),
+        mjpeg_generator(None),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate",
                  "Pragma": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-@app.get("/api/camera/snapshot.jpg", tags=["camera"], summary="当前帧 JPEG 快照(单张)")
+@app.get("/api/camera/{cam_id}/stream.mjpg", tags=["camera"], summary="MJPEG 指定 cam 流")
+async def camera_stream_byid(cam_id: str):
+    if _get_cam(cam_id) is None: raise HTTPException(503, f"camera {cam_id} not ready")
+    return StreamingResponse(
+        mjpeg_generator(cam_id),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate",
+                 "Pragma": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/camera/snapshot.jpg", tags=["camera"], summary="主 cam 当前帧 JPEG (兼容)")
 async def camera_snapshot():
-    if camera is None:
-        raise HTTPException(503, "camera not ready")
-    jpeg, _ = camera.get_jpeg()
-    if not jpeg:
-        raise HTTPException(503, "no frame yet")
+    cam = _get_cam()
+    if cam is None: raise HTTPException(503, "main camera not ready")
+    jpeg, _ = cam.get_jpeg()
+    if not jpeg: raise HTTPException(503, "no frame yet")
     return StreamingResponse(iter([jpeg]), media_type="image/jpeg")
+
+
+@app.get("/api/camera/{cam_id}/snapshot.jpg", tags=["camera"], summary="指定 cam 当前帧 JPEG")
+async def camera_snapshot_byid(cam_id: str):
+    cam = _get_cam(cam_id)
+    if cam is None: raise HTTPException(503, f"camera {cam_id} not ready")
+    jpeg, _ = cam.get_jpeg()
+    if not jpeg: raise HTTPException(503, "no frame yet")
+    return StreamingResponse(iter([jpeg]), media_type="image/jpeg")
+
+
+@app.get("/api/camera/list", tags=["camera"], summary="所有 cam 列表 + 状态")
+async def camera_list():
+    cams = getattr(app.state, "cameras", {}) or {}
+    main = getattr(app.state, "main_cam_id", None)
+    out = []
+    for cid, cs in cams.items():
+        out.append({
+            "id": cid, "is_main": (cid == main),
+            "ok": (cs is not None and cs.is_alive() if cs else False),
+            "device": (cs.device if cs else None),
+            "fps": round(cs.fps(), 1) if cs else 0.0,
+            "frame_age_ms": int((time.time() - cs.last_frame_t) * 1000) if (cs and cs.last_frame_t) else None,
+            "error": (cs.error if cs else "not initialized"),
+        })
+    return {"cameras": out, "main_id": main}
+
+
+@app.post("/api/camera/config", tags=["camera"], summary="设置主 cam",
+          description='body: `{"main_id": "a" | "b" | ...}`. 主 cam 影响:兼容 `/api/camera/stream.mjpg` 走哪个、YOLO 推理输入、REAR CAM mirror 默认作用对象。')
+async def camera_config(req: Request):
+    body = await req.json()
+    cams = getattr(app.state, "cameras", {}) or {}
+    new_main = body.get("main_id")
+    if new_main not in cams:
+        raise HTTPException(400, f"unknown cam id {new_main}; available: {list(cams.keys())}")
+    if cams.get(new_main) is None:
+        raise HTTPException(400, f"cam {new_main} not alive")
+    app.state.main_cam_id = new_main
+    global camera
+    camera = cams[new_main]
+    push_log(f"main cam → {new_main}", "sys")
+    return {"ok": True, "main_id": new_main}
 
 
 # ====================== WebSocket ======================
@@ -2400,6 +2494,28 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 /* REAR CAM 镜像:cam-img 水平翻转;bbox 由 JS 反转 x 坐标(保留文字方向);HUD/corner 不动 */
 .cam-frame.mirror .cam-img{transform:scaleX(-1)}
 .cam-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;display:block;z-index:1}
+
+/* 多 cam stack layout */
+.cam-stack{display:flex;gap:6px;flex:0 0 auto}
+.cam-stack.layout-side{flex-direction:row}
+.cam-stack.layout-side .cam-frame{flex:1 1 50%;aspect-ratio:4/3}
+.cam-stack.layout-stack{flex-direction:column}
+.cam-stack.layout-pip{display:block;position:relative}
+.cam-stack.layout-pip .cam-frame.primary{width:100%}
+.cam-stack.layout-pip .cam-frame.secondary{position:absolute;right:8px;bottom:8px;width:28%;aspect-ratio:4/3;
+  border:2px solid var(--amber);box-shadow:0 4px 12px rgba(0,0,0,.6);z-index:3;cursor:pointer}
+.cam-stack.layout-single .cam-frame.secondary{display:none}
+.cam-stack.layout-single .cam-frame.primary{width:100%}
+/* 副 cam 标签 */
+.cam-id-tag{position:absolute;top:4px;left:6px;font-family:var(--font-tech);font-size:9px;
+  letter-spacing:.2em;color:var(--amber);background:rgba(0,0,0,.55);padding:2px 6px;z-index:4;
+  border:1px solid rgba(255,176,0,.3)}
+.cam-frame.primary .cam-id-tag{border-color:var(--amber);background:rgba(255,176,0,.15)}
+/* layout / main 配置控件 */
+.cam-cfg-row{display:flex;gap:6px;align-items:center;font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em}
+.cam-cfg-row select{background:#1a1610;border:1px solid var(--line2);color:var(--amber);
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;padding:2px 6px;cursor:pointer;text-transform:uppercase}
+.cam-cfg-row select:focus{border-color:var(--amber);outline:none}
 .cam-corner{position:absolute;width:14px;height:14px;border:1.5px solid var(--amber);z-index:4;opacity:.85}
 .cam-corner.tl{top:4px;left:4px;border-right:none;border-bottom:none}
 .cam-corner.tr{top:4px;right:4px;border-left:none;border-bottom:none}
@@ -2592,24 +2708,46 @@ svg.schem{width:100%;height:100%;display:block}
   <section class="panel pane-cam">
     <div class="panel-head">CAM · LIVE FEED <span class="ph-r" id="camMeta">— FPS</span></div>
     <div class="panel-body">
-      <div class="cam-frame">
-        <img class="cam-img" id="camImg" alt="" referrerpolicy="no-referrer"/>
-        <svg class="cam-hud" id="camHud" viewBox="0 0 400 300" preserveAspectRatio="none">
-          <g id="hudMode" class="hud-badge">
-            <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#ffb000" stroke-width="1"/>
-            <text x="72" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
-          </g>
-          <g id="hudAlert" opacity="0">
-            <rect x="262" y="6" width="132" height="20" fill="rgba(255,58,46,0.88)" stroke="#ff3a2e" stroke-width="1"/>
-            <text x="328" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#0b0907" letter-spacing="2" font-weight="700">! OBSTACLE !</text>
-          </g>
-          <g id="yoloBoxes"></g>
-        </svg>
-        <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
-        <div class="cam-corner bl"></div><div class="cam-corner br"></div>
-        <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
-        <div class="cam-rec"><div class="recdot"></div>LIVE</div>
-        <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
+      <div class="cam-stack layout-side" id="camStack">
+        <div class="cam-frame primary" data-cam="a">
+          <img class="cam-img" id="camImg" alt="" referrerpolicy="no-referrer"/>
+          <svg class="cam-hud" id="camHud" viewBox="0 0 400 300" preserveAspectRatio="none">
+            <g id="hudMode" class="hud-badge">
+              <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#ffb000" stroke-width="1"/>
+              <text x="72" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
+            </g>
+            <g id="hudAlert" opacity="0">
+              <rect x="262" y="6" width="132" height="20" fill="rgba(255,58,46,0.88)" stroke="#ff3a2e" stroke-width="1"/>
+              <text x="328" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#0b0907" letter-spacing="2" font-weight="700">! OBSTACLE !</text>
+            </g>
+            <g id="yoloBoxes"></g>
+          </svg>
+          <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
+          <div class="cam-corner bl"></div><div class="cam-corner br"></div>
+          <div class="cam-id-tag" id="camTagA">CAM_A · MAIN</div>
+          <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
+          <div class="cam-rec"><div class="recdot"></div>LIVE</div>
+          <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
+        </div>
+        <div class="cam-frame secondary" data-cam="b" id="camFrameB" title="click to swap with main">
+          <img class="cam-img" id="camImgB" alt="" referrerpolicy="no-referrer"/>
+          <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
+          <div class="cam-corner bl"></div><div class="cam-corner br"></div>
+          <div class="cam-id-tag" id="camTagB">CAM_B</div>
+          <div class="cam-overlay-err" id="camErrB" style="display:none">NO_SIGNAL</div>
+        </div>
+      </div>
+
+      <div class="cam-cfg-row" style="margin-top:4px">
+        <span>LAYOUT</span>
+        <select id="camLayoutSel">
+          <option value="layout-side">SIDE×SIDE</option>
+          <option value="layout-stack">STACK ↑↓</option>
+          <option value="layout-pip">PIP</option>
+          <option value="layout-single">SINGLE (MAIN)</option>
+        </select>
+        <span style="margin-left:8px">MAIN</span>
+        <select id="camMainSel"></select>
       </div>
 
       <div class="btn-row btn-2">
@@ -2979,18 +3117,116 @@ svg.schem{width:100%;height:100%;display:block}
   const $$ = q => document.querySelectorAll(q);
   const startTime = Date.now();
 
-  // ============ Camera image ============
-  // Use single <img> with mjpeg endpoint. Add cache-buster on (re)mount.
-  function startCam(){
-    const img = $('#camImg');
-    img.onerror = () => {
-      $('#camErr').style.display = 'flex';
-      setTimeout(() => { img.src = `/api/camera/stream.mjpg?t=${Date.now()}`; }, 1500);
-    };
-    img.onload = () => { $('#camErr').style.display = 'none'; };
-    img.src = `/api/camera/stream.mjpg?t=${Date.now()}`;
+  // ============ Camera image (multi-cam) ============
+  // 每个 <img> 走自己的 /api/camera/{id}/stream.mjpg。错时 1.5s 重连(cache-buster)。
+  function startCamImg(imgId, errId, camId){
+    const img = $('#' + imgId);
+    const errEl = $('#' + errId);
+    const url = () => `/api/camera/${camId}/stream.mjpg?t=${Date.now()}`;
+    img.onerror = () => { errEl.style.display = 'flex'; setTimeout(() => { img.src = url(); }, 1500); };
+    img.onload = () => { errEl.style.display = 'none'; };
+    img.src = url();
   }
-  startCam();
+  // 跟主/副 frame 的 data-cam 联动 — 启动时按 frame 上的 data-cam 拉对应流
+  function rebindCamImgs(){
+    document.querySelectorAll('.cam-frame').forEach(fr => {
+      const cid = fr.dataset.cam;
+      const img = fr.querySelector('.cam-img');
+      const err = fr.querySelector('.cam-overlay-err');
+      if (!cid || !img) return;
+      const newSrc = `/api/camera/${cid}/stream.mjpg?t=${Date.now()}`;
+      if (img.src && img.src.includes(`/api/camera/${cid}/`)) return;  // 已经在播该 cam
+      img.onerror = () => { if (err) err.style.display = 'flex'; setTimeout(() => { img.src = `/api/camera/${cid}/stream.mjpg?t=${Date.now()}`; }, 1500); };
+      img.onload = () => { if (err) err.style.display = 'none'; };
+      img.src = newSrc;
+    });
+  }
+  rebindCamImgs();
+
+  // ============ Multi-cam config (layout + main) ============
+  const CAM_LAYOUT_KEY = 'camLayout';
+  const CAM_FRAME_ORDER_KEY = 'camFrameOrder';  // 记 [primaryId, secondaryId]
+  function applyCamLayout(layoutCls){
+    const stack = $('#camStack');
+    if (!stack) return;
+    ['layout-side','layout-stack','layout-pip','layout-single'].forEach(c => stack.classList.remove(c));
+    stack.classList.add(layoutCls);
+    localStorage.setItem(CAM_LAYOUT_KEY, layoutCls);
+    $('#camLayoutSel').value = layoutCls;
+  }
+  function setPrimaryCam(camId){
+    const stack = $('#camStack');
+    if (!stack) return;
+    const frames = stack.querySelectorAll('.cam-frame');
+    let primaryEl = null, secondaryEl = null;
+    frames.forEach(fr => {
+      if (fr.dataset.cam === camId){ fr.classList.add('primary'); fr.classList.remove('secondary'); primaryEl = fr; }
+      else { fr.classList.remove('primary'); fr.classList.add('secondary'); secondaryEl = fr; }
+    });
+    // DOM 顺序:primary 在前(side/stack/pip 都需要)
+    if (primaryEl && secondaryEl && stack.children[0] !== primaryEl){
+      stack.insertBefore(primaryEl, secondaryEl);
+    }
+    // 标签更新
+    document.querySelectorAll('.cam-id-tag').forEach(t => {
+      const fr = t.closest('.cam-frame');
+      if (!fr) return;
+      const cid = fr.dataset.cam.toUpperCase();
+      t.textContent = fr.classList.contains('primary') ? `CAM_${cid} · MAIN` : `CAM_${cid}`;
+    });
+    // mirror 跟随主 cam
+    applyRearMode();
+    localStorage.setItem(CAM_FRAME_ORDER_KEY, camId);
+  }
+  async function camListInit(){
+    try {
+      const r = await fetch('/api/camera/list'); const d = await r.json();
+      const sel = $('#camMainSel');
+      sel.innerHTML = '';
+      (d.cameras || []).forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = `CAM_${c.id.toUpperCase()}${c.ok ? '' : ' · DOWN'}`;
+        if (c.is_main) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      // 只有 1 个 cam 时隐藏副 frame + main select
+      const camCount = (d.cameras || []).filter(c => c.ok).length;
+      if (camCount < 2){
+        const sec = document.querySelector('.cam-frame.secondary');
+        if (sec) sec.style.display = 'none';
+        sel.disabled = true;
+      }
+      // 应用持久化偏好
+      const savedMain = localStorage.getItem(CAM_FRAME_ORDER_KEY) || d.main_id;
+      if (savedMain && (d.cameras || []).find(c => c.id === savedMain && c.ok)){
+        setPrimaryCam(savedMain);
+        if (savedMain !== d.main_id){
+          try { await fetch('/api/camera/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({main_id: savedMain})}); } catch(e){}
+          sel.value = savedMain;
+        }
+      }
+      const savedLayout = localStorage.getItem(CAM_LAYOUT_KEY) || 'layout-side';
+      applyCamLayout(savedLayout);
+    } catch(e){ console.error('camList init', e); }
+  }
+  camListInit();
+  $('#camLayoutSel').addEventListener('change', ev => applyCamLayout(ev.target.value));
+  $('#camMainSel').addEventListener('change', async ev => {
+    const newMain = ev.target.value;
+    try { await fetch('/api/camera/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({main_id: newMain})}); } catch(e){}
+    setPrimaryCam(newMain);
+  });
+  // PIP 模式下 click 副 frame = swap main
+  document.addEventListener('click', ev => {
+    const stack = $('#camStack');
+    if (!stack || !stack.classList.contains('layout-pip')) return;
+    const sec = ev.target.closest('.cam-frame.secondary');
+    if (!sec) return;
+    const newMain = sec.dataset.cam;
+    const sel = $('#camMainSel');
+    if (sel) { sel.value = newMain; sel.dispatchEvent(new Event('change')); }
+  });
 
   // ============ WebSocket ============
   let ws = null;
@@ -3131,8 +3367,10 @@ svg.schem{width:100%;height:100%;display:block}
   // 让用户的 FPS 直觉(按 W 画面里东西靠近)跟实际车控制对应起来
   let rearMode = localStorage.getItem('rearMode') === 'true';
   function applyRearMode(){
-    const frame = document.querySelector('.cam-frame');
-    if (frame) frame.classList.toggle('mirror', rearMode);
+    // mirror 始终作用主 cam frame(.primary),副 cam 不动
+    document.querySelectorAll('.cam-frame').forEach(fr => fr.classList.remove('mirror'));
+    const primary = document.querySelector('.cam-frame.primary');
+    if (primary && rearMode) primary.classList.add('mirror');
     const btn = $('#btnMirror');
     if (btn) btn.classList.toggle('on', rearMode);
     const badge = $('#mirrorBadge');
