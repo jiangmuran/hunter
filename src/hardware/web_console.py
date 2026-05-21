@@ -2558,7 +2558,10 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .arm-joint-input{width:100%;background:#1a1610;border:1px solid var(--line2);color:var(--cyan);font-family:var(--font-mono);font-size:11px;padding:2px 4px;text-align:right;transition:border-color .15s,background .15s,color .15s}
 .arm-joint-input:focus{outline:none;border-color:var(--amber)}
 .arm-joint-input:disabled{opacity:0.4;cursor:not-allowed;background:#0e0a06}
-.arm-nudge{padding:2px 0;font-size:11px;letter-spacing:0}
+.arm-nudge{padding:2px 0;font-size:11px;letter-spacing:0;transition:background .15s,border-color .15s,color .15s}
+.arm-nudge-pending{background:rgba(255,176,0,.25)!important;border-color:var(--amber)!important;color:var(--amber)!important}
+.arm-nudge-ok{background:rgba(127,255,90,.3)!important;border-color:#7fff5a!important;color:#7fff5a!important}
+.arm-nudge-err{background:rgba(255,58,46,.3)!important;border-color:#ff3a2e!important;color:#ff7a6e!important}
 
 #btnRecToggle.recording{background:rgba(255,58,46,.15);border-color:#ff3a2e;color:#ff7a6e}
 #btnRecToggle.recording::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff3a2e;margin-right:6px;animation:pulse 1s ease-in-out infinite}
@@ -4456,12 +4459,34 @@ svg.schem{width:100%;height:100%;display:block}
           grid.innerHTML = html;
           grid.querySelectorAll('[data-joint-nudge]').forEach(b => {
             b.addEventListener('click', async () => {
+              if (b.disabled) return;
+              b.disabled = true;
+              b.classList.add('arm-nudge-pending');
+              const body = JSON.stringify({joint: b.dataset.jointNudge, delta_deg: parseFloat(b.dataset.delta)});
               try {
-                await fetch('/api/arm/nudge_joint', {
-                  method:'POST', headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({joint: b.dataset.jointNudge, delta_deg: parseFloat(b.dataset.delta)}),
+                const r = await fetch('/api/arm/nudge_joint', {
+                  method:'POST', headers:{'Content-Type':'application/json'}, body,
                 });
-              } catch(e){}
+                b.classList.remove('arm-nudge-pending');
+                if (r.ok){
+                  b.classList.add('arm-nudge-ok');
+                  setTimeout(() => b.classList.remove('arm-nudge-ok'), 300);
+                } else {
+                  let detail = '';
+                  try { detail = (await r.json()).detail || ''; } catch{}
+                  b.classList.add('arm-nudge-err');
+                  b.title = `${r.status} ${detail}`;
+                  console.error('nudge fail', b.dataset.jointNudge, b.dataset.delta, r.status, detail);
+                  setTimeout(() => b.classList.remove('arm-nudge-err'), 1500);
+                }
+              } catch(e){
+                b.classList.remove('arm-nudge-pending');
+                b.classList.add('arm-nudge-err');
+                console.error('nudge exception', e);
+                setTimeout(() => b.classList.remove('arm-nudge-err'), 1500);
+              }
+              // 防 spam:200ms 内不让连点(controller arm_lock 串行,连点会丢)
+              setTimeout(() => { b.disabled = false; }, 200);
             });
           });
           // 绝对角度输入:Enter / blur 提交 + client-side limit check
