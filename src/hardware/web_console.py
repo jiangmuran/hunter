@@ -2509,19 +2509,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 <style>
 :root{
-  --bg:#0b0907; --bg2:#13100b; --panel:#1a1610; --panel2:#221c12;
-  --line:#312715; --line2:#5a4923;
-  --amber:#ffb000; --amber-d:#cf8a00; --amber-l:#ffd266;
-  --red:#ff3a2e; --red-d:#a8221a;
-  --green:#7fff5a; --cyan:#5af0ff;
-  --text:#ece2c4; --text-dim:#897a59; --text-mute:#4f4530;
+  /* 深空青·空军仪表盘 */
+  --bg:#0a141e; --bg2:#0f1c2c; --panel:#122438; --panel2:#172e44;
+  --line:#1f3a5a; --line2:#2d527a;
+  /* --amber 是 legacy 名,实际是青色主调 — 大量样式按这个名字引用,改 token 全局生效 */
+  --amber:#5ad7ff; --amber-d:#3aa8d0; --amber-l:#9bedff;
+  --red:#ff5a6a; --red-d:#a83340;
+  --green:#6ad77c; --cyan:#5ad7ff;
+  --warn:#ffb35a;  /* 单独 warning 琥珀色,跟主色分开 */
+  --text:#cfe3ff; --text-dim:#7d96b8; --text-mute:#4a5e7a;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:var(--font-mono);user-select:none;-webkit-user-select:none;
 }
 body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;
-  background:repeating-linear-gradient(0deg,rgba(255,176,0,.025) 0,rgba(255,176,0,.025) 1px,transparent 1px,transparent 3px),
+  background:repeating-linear-gradient(0deg,rgba(90,215,255,.025) 0,rgba(90,215,255,.025) 1px,transparent 1px,transparent 3px),
     radial-gradient(ellipse at 50% -20%,#1a140a 0%,#0b0907 70%);
 }
 body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
@@ -2536,8 +2539,35 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
     "head head head head"
     "cam  tele deck side"
     "log  log  log  side";
-  gap:1px;padding:8px;background:#1a1410;
+  gap:1px;padding:8px;background:var(--bg2);
 }
+/* OPERATE: 主 cam 大,tele+deck 右,side 收起,log 缩为 28px collapse */
+body.mode-operate #app{
+  grid-template-rows:54px 1fr 32px;
+  grid-template-columns:1.7fr 1fr 1fr;
+  grid-template-areas:
+    "head head head"
+    "cam  tele deck"
+    "log  log  log";
+}
+body.mode-operate .pane-side{display:none}
+body.mode-operate .pane-log .panel-body{display:none}
+body.mode-operate .pane-log .panel-head{cursor:pointer}
+/* DEBUG: 现有四列全展示 */
+body.mode-debug{}
+/* SETTINGS: 隐藏 deck (主操作面板),保留 cam (调 layout) + side (audio 音量) + tele (校准),
+   主区第二列改用 settings 占位(用现有 tele panel 内的内容 + cam config + audio) */
+body.mode-settings #app{
+  grid-template-rows:54px 1fr 32px;
+  grid-template-columns:1.4fr 1fr 320px;
+  grid-template-areas:
+    "head head head"
+    "cam  tele side"
+    "log  log  log";
+}
+body.mode-settings .pane-deck{display:none}
+body.mode-settings .pane-log .panel-body{display:none}
+body.mode-settings .pane-log .panel-head{cursor:pointer}
 
 .panel{background:var(--bg2);border:1px solid var(--line);position:relative;overflow:hidden;display:flex;flex-direction:column}
 .panel-head{flex:0 0 28px;display:flex;align-items:center;padding:0 12px;
@@ -2555,15 +2585,15 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .map-reset-btn{margin-left:10px;background:transparent;border:1px solid var(--line2);
   color:var(--text-dim);font-family:var(--font-mono);font-size:9px;letter-spacing:.15em;
   padding:2px 8px;cursor:pointer;text-transform:uppercase;height:18px}
-.map-reset-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.06)}
+.map-reset-btn:hover{border-color:var(--amber);color:var(--amber);background:rgba(90,215,255,.06)}
 
 /* Recording panel */
 .rec-progress-row{display:flex;align-items:center;gap:8px}
 .rec-progress-track{flex:1;height:4px;background:#1a1610;border:1px solid var(--line2);position:relative;overflow:hidden}
-.rec-progress-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#ffb000,#ff8800);width:0%;transition:width .15s}
+.rec-progress-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#5ad7ff,#3aa8d0);width:0%;transition:width .15s}
 .rec-progress-meta{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em;min-width:90px;text-align:right}
 .rec-current{font-family:var(--font-mono);font-size:11px;color:var(--amber);letter-spacing:.18em;padding:4px 8px;
-  background:rgba(255,176,0,.07);border-left:2px solid var(--amber);text-transform:uppercase}
+  background:rgba(90,215,255,.07);border-left:2px solid var(--amber);text-transform:uppercase}
 .cal-toggle{display:flex;align-items:center;gap:8px;margin-top:8px;font-family:var(--font-mono);
   font-size:10px;color:var(--text-dim);letter-spacing:.15em;text-transform:uppercase;cursor:pointer}
 .cal-toggle input{margin:0;accent-color:var(--amber)}
@@ -2592,7 +2622,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .arm-joint-input:focus{outline:none;border-color:var(--amber)}
 .arm-joint-input:disabled{opacity:0.4;cursor:not-allowed;background:#0e0a06}
 .arm-nudge{padding:2px 0;font-size:11px;letter-spacing:0;transition:background .15s,border-color .15s,color .15s}
-.arm-nudge-pending{background:rgba(255,176,0,.25)!important;border-color:var(--amber)!important;color:var(--amber)!important}
+.arm-nudge-pending{background:rgba(90,215,255,.25)!important;border-color:var(--amber)!important;color:var(--amber)!important}
 .arm-nudge-ok{background:rgba(127,255,90,.3)!important;border-color:#7fff5a!important;color:#7fff5a!important}
 .arm-nudge-err{background:rgba(255,58,46,.3)!important;border-color:#ff3a2e!important;color:#ff7a6e!important}
 
@@ -2607,13 +2637,20 @@ header{grid-area:head;background:linear-gradient(90deg,#1a1410,#15110b 50%,#1a14
 header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px;
   background:linear-gradient(90deg,transparent,var(--amber),transparent);opacity:.7;
 }
+/* 顶部 mode 切换 nav */
+.mode-nav{display:flex;gap:2px;margin-left:14px}
+.mode-btn{background:transparent;border:1px solid var(--line2);color:var(--text-dim);
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;padding:6px 14px;
+  cursor:pointer;text-transform:uppercase;transition:all .15s;height:28px}
+.mode-btn:hover{color:var(--amber-l);border-color:var(--amber);background:rgba(90,215,255,.06)}
+.mode-btn.active{background:rgba(90,215,255,.18);border-color:var(--amber);color:var(--amber);box-shadow:inset 0 0 12px rgba(90,215,255,.18)}
 .h-brand{font-family:var(--font-display);font-size:20px;letter-spacing:.32em;color:var(--amber);
-  text-transform:uppercase;text-shadow:0 0 12px rgba(255,176,0,.4)}
+  text-transform:uppercase;text-shadow:0 0 12px rgba(90,215,255,.4)}
 .h-sub{font-size:10px;color:var(--text-dim);letter-spacing:.22em;text-transform:uppercase}
 .h-right{margin-left:auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .h-stat{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--text-dim);letter-spacing:.12em;text-transform:uppercase;cursor:default}
 .h-stat[title]{cursor:help}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--text-mute);box-shadow:0 0 6px rgba(255,176,0,.4);transition:background .2s,box-shadow .2s}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--text-mute);box-shadow:0 0 6px rgba(90,215,255,.4);transition:background .2s,box-shadow .2s}
 .dot.ok{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
 .dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.2s infinite}
 .dot.error{background:var(--red);box-shadow:0 0 8px var(--red);animation:pulse .6s infinite}
@@ -2629,10 +2666,10 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
   max-height:55vh}
 .pane-cam .panel-body{overflow-y:auto}
 .cam-frame::before{content:"";position:absolute;inset:0;
-  background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,rgba(255,176,0,.04) 2px,rgba(255,176,0,.04) 3px);
+  background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,rgba(90,215,255,.04) 2px,rgba(90,215,255,.04) 3px);
   pointer-events:none;z-index:2;
 }
-.cam-frame::after{content:"";position:absolute;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,176,0,.4),transparent);
+.cam-frame::after{content:"";position:absolute;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(90,215,255,.4),transparent);
   animation:scan 3.5s linear infinite;pointer-events:none;z-index:3;
 }
 .cam-hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
@@ -2655,8 +2692,8 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 /* 副 cam 标签 */
 .cam-id-tag{position:absolute;top:4px;left:6px;font-family:var(--font-tech);font-size:9px;
   letter-spacing:.2em;color:var(--amber);background:rgba(0,0,0,.55);padding:2px 6px;z-index:4;
-  border:1px solid rgba(255,176,0,.3)}
-.cam-frame.primary .cam-id-tag{border-color:var(--amber);background:rgba(255,176,0,.15)}
+  border:1px solid rgba(90,215,255,.3)}
+.cam-frame.primary .cam-id-tag{border-color:var(--amber);background:rgba(90,215,255,.15)}
 /* layout / main 配置控件 */
 .cam-cfg-row{display:flex;gap:6px;align-items:center;font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em}
 .cam-cfg-row select{background:#1a1610;border:1px solid var(--line2);color:var(--amber);
@@ -2678,7 +2715,7 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 .filter-row{display:grid;grid-template-columns:50px 1fr;gap:8px;align-items:center;margin-top:6px}
 .filter-row input[type="text"]{background:var(--panel);border:1px solid var(--line2);color:var(--text);
   font-family:var(--font-mono);font-size:10px;padding:5px 7px;outline:none;letter-spacing:.05em}
-.filter-row input[type="text"]:focus{border-color:var(--amber);box-shadow:0 0 6px rgba(255,176,0,.25)}
+.filter-row input[type="text"]:focus{border-color:var(--amber);box-shadow:0 0 6px rgba(90,215,255,.25)}
 .filter-row input[type="text"]::placeholder{color:var(--text-mute)}
 .slider-row{display:grid;grid-template-columns:50px 1fr 48px;gap:8px;align-items:center;font-size:10px;margin-top:5px}
 .slider-label{color:var(--text-dim);letter-spacing:.18em;text-transform:uppercase}
@@ -2698,8 +2735,8 @@ input[type="range"]{accent-color:var(--amber);height:4px;cursor:pointer}
 .pane-tele{grid-area:tele}
 .schem-wrap{position:relative;flex:1 1 0;min-height:150px;border:1px solid var(--line);
   background:
-    repeating-linear-gradient(0deg,rgba(255,176,0,.04) 0,rgba(255,176,0,.04) 1px,transparent 1px,transparent 24px),
-    repeating-linear-gradient(90deg,rgba(255,176,0,.04) 0,rgba(255,176,0,.04) 1px,transparent 1px,transparent 24px),
+    repeating-linear-gradient(0deg,rgba(90,215,255,.04) 0,rgba(90,215,255,.04) 1px,transparent 1px,transparent 24px),
+    repeating-linear-gradient(90deg,rgba(90,215,255,.04) 0,rgba(90,215,255,.04) 1px,transparent 1px,transparent 24px),
     #0e0b07;
 }
 .schem-l,.schem-r{position:absolute;top:6px;font-size:9px;letter-spacing:.2em;text-transform:uppercase}
@@ -2713,7 +2750,7 @@ svg.schem{width:100%;height:100%;display:block}
 .ureading::after{content:"";position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-bottom:1px solid var(--amber);border-right:1px solid var(--amber)}
 .ureading-label{font-size:9px;color:var(--text-dim);letter-spacing:.2em;text-transform:uppercase}
 .ureading-row{display:flex;align-items:baseline;margin-top:2px}
-.ureading-val{font-family:var(--font-tech);font-size:24px;color:var(--amber);text-shadow:0 0 8px rgba(255,176,0,.4);line-height:1}
+.ureading-val{font-family:var(--font-tech);font-size:24px;color:var(--amber);text-shadow:0 0 8px rgba(90,215,255,.4);line-height:1}
 .ureading-val.danger{color:var(--red);text-shadow:0 0 10px var(--red);animation:flicker .35s infinite}
 .ureading-unit{font-size:10px;color:var(--text-mute);margin-left:5px}
 .ureading-bar{margin-top:6px;height:3px;background:var(--bg);border:1px solid var(--line);position:relative}
@@ -2743,9 +2780,9 @@ svg.schem{width:100%;height:100%;display:block}
 .key small{font-size:8px;color:var(--text-dim);font-weight:400;letter-spacing:.12em;margin-top:3px}
 .key.empty{background:transparent;border:1px dashed var(--line);cursor:default}
 .key:not(.empty):active,.key.active{
-  background:linear-gradient(180deg,#5a4818,#ffb000);color:var(--bg);
+  background:linear-gradient(180deg,#5a4818,#5ad7ff);color:var(--bg);
   border-color:var(--amber);border-bottom-width:1px;transform:translateY(2px);
-  box-shadow:0 0 22px rgba(255,176,0,.55),inset 0 -2px 4px rgba(0,0,0,.35);
+  box-shadow:0 0 22px rgba(90,215,255,.55),inset 0 -2px 4px rgba(0,0,0,.35);
 }
 .key.active small,.key:not(.empty):active small{color:rgba(0,0,0,.55)}
 
@@ -2763,7 +2800,7 @@ svg.schem{width:100%;height:100%;display:block}
 .btn:active{background:var(--amber);color:var(--bg);border-color:var(--amber)}
 .btn .badge{font-size:9px;color:var(--text-mute);letter-spacing:.15em}
 .btn:hover .badge{color:var(--amber-l)}
-.btn.on{background:rgba(255,176,0,.14);border-color:var(--amber);color:var(--amber);box-shadow:inset 0 0 14px rgba(255,176,0,.18)}
+.btn.on{background:rgba(90,215,255,.14);border-color:var(--amber);color:var(--amber);box-shadow:inset 0 0 14px rgba(90,215,255,.18)}
 .btn.on .badge{color:var(--amber)}
 .btn.compact{padding:8px 6px;font-size:10px;justify-content:center}
 
@@ -2780,7 +2817,7 @@ svg.schem{width:100%;height:100%;display:block}
 .pane-log .panel-body{padding:8px 12px}
 .log-body{overflow-y:auto;flex:1;font-family:var(--font-tech);font-size:11.5px;line-height:1.6;color:var(--text-dim)}
 .log-line{display:flex;gap:10px;padding:1px 4px;border-left:2px solid transparent}
-.log-line:hover{background:rgba(255,176,0,.05);border-left-color:var(--amber)}
+.log-line:hover{background:rgba(90,215,255,.05);border-left-color:var(--amber)}
 .log-line .ts{color:var(--text-mute);flex:0 0 88px}
 .log-line .kind{flex:0 0 56px;color:var(--amber);font-size:10px;text-transform:uppercase}
 .log-line .msg{color:var(--text);flex:1;word-break:break-all}
@@ -2796,7 +2833,7 @@ svg.schem{width:100%;height:100%;display:block}
   border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;
   font-family:var(--font-tech);letter-spacing:.05em}
 .audio-item:last-child{border-bottom:none}
-.audio-item:hover{color:var(--amber);background:rgba(255,176,0,.05)}
+.audio-item:hover{color:var(--amber);background:rgba(90,215,255,.05)}
 .audio-item .size{color:var(--text-mute);font-size:9px}
 .audio-empty{padding:24px 12px;text-align:center;color:var(--text-mute);font-size:10px;letter-spacing:.2em}
 .sec-label{font-size:9px;letter-spacing:.22em;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px}
@@ -2841,7 +2878,11 @@ svg.schem{width:100%;height:100%;display:block}
 <div id="app">
   <header>
     <div class="h-brand">ROBOT_CTRL</div>
-    <div class="h-sub">// RPI-01 // 3WD</div>
+    <nav class="mode-nav">
+      <button class="mode-btn active" data-mode="operate">OPERATE</button>
+      <button class="mode-btn" data-mode="debug">DEBUG</button>
+      <button class="mode-btn" data-mode="settings">SETTINGS</button>
+    </nav>
     <div class="h-right">
       <div class="h-stat" title="WebSocket uplink"><div class="dot" id="dotLink"></div><span id="linkText">UPLINK</span></div>
       <div class="h-stat" title="ESP32 串口"><div class="dot" id="dotSerial"></div><span>SERIAL</span></div>
@@ -2863,8 +2904,8 @@ svg.schem{width:100%;height:100%;display:block}
           <img class="cam-img" id="camImg" alt="" referrerpolicy="no-referrer"/>
           <svg class="cam-hud" id="camHud" viewBox="0 0 400 300" preserveAspectRatio="none">
             <g id="hudMode" class="hud-badge">
-              <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#ffb000" stroke-width="1"/>
-              <text x="72" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#ffb000" letter-spacing="2" id="hudModeText">STANDBY</text>
+              <rect x="6" y="6" width="132" height="20" fill="rgba(0,0,0,0.65)" stroke="#5ad7ff" stroke-width="1"/>
+              <text x="72" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="11" fill="#5ad7ff" letter-spacing="2" id="hudModeText">STANDBY</text>
             </g>
             <g id="hudAlert" opacity="0">
               <rect x="262" y="6" width="132" height="20" fill="rgba(255,58,46,0.88)" stroke="#ff3a2e" stroke-width="1"/>
@@ -2948,8 +2989,8 @@ svg.schem{width:100%;height:100%;display:block}
         <svg class="schem" id="schem" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet">
           <defs>
             <radialGradient id="sonarG" cx="50%" cy="100%" r="100%">
-              <stop offset="0%" stop-color="#ffb000" stop-opacity="0.55"/>
-              <stop offset="100%" stop-color="#ffb000" stop-opacity="0"/>
+              <stop offset="0%" stop-color="#5ad7ff" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="#5ad7ff" stop-opacity="0"/>
             </radialGradient>
             <radialGradient id="sonarR" cx="50%" cy="100%" r="100%">
               <stop offset="0%" stop-color="#ff3a2e" stop-opacity="0.65"/>
@@ -2970,7 +3011,7 @@ svg.schem{width:100%;height:100%;display:block}
           <polyline id="worldTrail" fill="none" stroke="#5af0ff" stroke-width="1.2" stroke-opacity="0.5" stroke-linecap="round" stroke-linejoin="round"/>
           <!-- 回放叠加层:录制时轨迹(灰虚)+ 回放时实际轨迹(亮青) -->
           <polyline id="recordedTrail" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.7" stroke-linecap="round"/>
-          <polyline id="replayTrail" fill="none" stroke="#ffb000" stroke-width="1.8" stroke-opacity="0.95" stroke-linecap="round"/>
+          <polyline id="replayTrail" fill="none" stroke="#5ad7ff" stroke-width="1.8" stroke-opacity="0.95" stroke-linecap="round"/>
           <g id="worldOcc"></g>
           <g id="worldHits"></g>
           <g id="originMarker" style="display:none">
@@ -2990,20 +3031,20 @@ svg.schem{width:100%;height:100%;display:block}
             <rect x="-58" y="22"  width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
             <rect x="44"  y="22"  width="14" height="22" fill="#3a3020" stroke="#5a4d2f"/>
 
-            <rect x="-44" y="-36" width="88" height="72" fill="#1f1a10" stroke="#ffb000" stroke-width="1.5"/>
+            <rect x="-44" y="-36" width="88" height="72" fill="#1f1a10" stroke="#5ad7ff" stroke-width="1.5"/>
             <line x1="-44" y1="-20" x2="44" y2="-20" stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
             <line x1="-44" y1="0"   x2="44" y2="0"   stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
             <line x1="-44" y1="20"  x2="44" y2="20"  stroke="#5a4d2f" stroke-dasharray="2 2" opacity=".6"/>
 
-            <polygon points="-10,-28 10,-28 0,-40" fill="#ffb000"/>
-            <circle cx="0" cy="0" r="2.5" fill="#ffb000"/>
+            <polygon points="-10,-28 10,-28 0,-40" fill="#5ad7ff"/>
+            <circle cx="0" cy="0" r="2.5" fill="#5ad7ff"/>
             <text x="0" y="12" text-anchor="middle" font-size="9" fill="#5a4d2f" font-family="JetBrains Mono, ui-monospace, Menlo, monospace">RPI-01</text>
 
-            <g><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+            <g><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#5ad7ff"/>
                <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S1</text></g>
-            <g transform="rotate(-50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+            <g transform="rotate(-50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#5ad7ff"/>
                <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S2</text></g>
-            <g transform="rotate(50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#ffb000"/>
+            <g transform="rotate(50)"><rect x="-6" y="-40" width="12" height="5" fill="#1a1610" stroke="#5ad7ff"/>
                <text x="0" y="-46" text-anchor="middle" font-size="8" fill="#8a7d5e">S3</text></g>
           </g>
           <text x="200" y="20" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, Menlo, monospace" font-size="10" fill="#5a4d2f" letter-spacing="3">FRONT</text>
@@ -3319,6 +3360,38 @@ svg.schem{width:100%;height:100%;display:block}
       }
     });
   }, 5000);
+
+  // ============ Mode nav (OPERATE / DEBUG / SETTINGS) ============
+  const MODE_KEY = 'consoleMode';
+  function applyMode(mode){
+    if (!['operate','debug','settings'].includes(mode)) mode = 'operate';
+    document.body.classList.remove('mode-operate','mode-debug','mode-settings');
+    document.body.classList.add('mode-' + mode);
+    document.querySelectorAll('.mode-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    });
+    localStorage.setItem(MODE_KEY, mode);
+    // 切到 OPERATE 时 deck 自动跳 DRIVE 子 tab
+    if (mode === 'operate'){
+      const driveBtn = document.querySelector('.tab-btn[data-tab="drive"]');
+      if (driveBtn && !driveBtn.classList.contains('active')) driveBtn.click();
+    }
+  }
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    b.addEventListener('click', () => applyMode(b.dataset.mode));
+  });
+  applyMode(localStorage.getItem(MODE_KEY) || 'operate');
+
+  // log panel head 点击 toggle(operate/settings mode 下默认折叠)
+  const logPanelHead = document.querySelector('.pane-log .panel-head');
+  if (logPanelHead){
+    logPanelHead.addEventListener('click', ev => {
+      const isCollapsed = document.body.classList.contains('mode-operate') || document.body.classList.contains('mode-settings');
+      if (!isCollapsed) return;  // debug mode 不需要 toggle
+      const body = document.querySelector('.pane-log .panel-body');
+      if (body) body.style.display = body.style.display === 'none' || !body.style.display ? 'flex' : 'none';
+    });
+  }
 
   // ============ Multi-cam config (layout + main) ============
   const CAM_LAYOUT_KEY = 'camLayout';
@@ -4072,9 +4145,9 @@ svg.schem{width:100%;height:100%;display:block}
     if (t) t.textContent = mode;
     const rect = document.querySelector('#hudMode rect');
     if (rect){
-      rect.setAttribute('stroke', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
+      rect.setAttribute('stroke', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#5ad7ff'));
     }
-    if (t) t.setAttribute('fill', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#ffb000'));
+    if (t) t.setAttribute('fill', em ? '#ff3a2e' : (modeObs || modeUltra ? '#7fff5a' : '#5ad7ff'));
   }
 
   // ============ Recording ============
@@ -4152,7 +4225,7 @@ svg.schem{width:100%;height:100%;display:block}
           const dEl = $(`#recCalDiff${id}`);
           if (diff != null){
             dEl.textContent = (diff >= 0 ? '+' : '') + diff;
-            dEl.style.color = Math.abs(diff) > 150 ? '#ff3a2e' : (Math.abs(diff) > 50 ? '#ffb000' : '#7fff5a');
+            dEl.style.color = Math.abs(diff) > 150 ? '#ff3a2e' : (Math.abs(diff) > 50 ? '#5ad7ff' : '#7fff5a');
           } else { dEl.textContent = '—'; dEl.style.color = ''; }
         });
       } else {
@@ -4236,7 +4309,7 @@ svg.schem{width:100%;height:100%;display:block}
         const len = Math.min(120, (data.distance_mm/MAX)*100 + 20);
         const half = len*0.55;
         const color = danger ? 'url(#sonarR)' : 'url(#sonarG)';
-        const strokeColor = danger ? '#ff3a2e' : '#ffb000';
+        const strokeColor = danger ? '#ff3a2e' : '#5ad7ff';
         sonar.innerHTML = `
           <path d="M 0 -40 L ${-half} ${-40-len} A ${len*1.1} ${len*1.1} 0 0 1 ${half} ${-40-len} Z"
                 fill="${color}" stroke="${strokeColor}" stroke-width="0.5" opacity="0.7"/>
@@ -4251,7 +4324,7 @@ svg.schem{width:100%;height:100%;display:block}
 
   // ============ YOLO control ============
   // 类别 id → 稳定颜色(避免每帧 random 闪烁)
-  const yoloPalette = ['#7fff5a','#ffb000','#5af0ff','#ff5af0','#ff8a2e','#a5e8ff','#ffd266','#7affb0','#ff9a9a','#c19aff'];
+  const yoloPalette = ['#7fff5a','#5ad7ff','#5af0ff','#ff5af0','#ff8a2e','#a5e8ff','#9bedff','#7affb0','#ff9a9a','#c19aff'];
   const yoloColor = id => yoloPalette[(id|0) % yoloPalette.length];
 
   function renderYoloBoxes(dets){
@@ -4640,7 +4713,7 @@ svg.schem{width:100%;height:100%;display:block}
         // 弹窗显示让用户能看 + 复制(clipboard 不一定 work)
         const w = window.open('', '_blank', 'width=500,height=600');
         if (w){
-          w.document.write(`<pre style="font-family:JetBrains Mono,monospace;font-size:13px;padding:16px;background:#1a1610;color:#ffb000">${text.replace(/</g,'&lt;')}</pre>`);
+          w.document.write(`<pre style="font-family:JetBrains Mono,monospace;font-size:13px;padding:16px;background:#1a1610;color:#5ad7ff">${text.replace(/</g,'&lt;')}</pre>`);
           w.document.title = 'arm joint observed min/max';
         } else {
           alert('已复制到剪贴板:\n\n' + text);
