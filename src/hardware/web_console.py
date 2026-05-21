@@ -2541,6 +2541,10 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .rec-cal-row>span:nth-child(2){color:#5af0ff}
 .rec-cal-row>span:nth-child(3){color:#7fff5a}
 .rec-cal-row>span:last-child{color:var(--text-bright);text-align:right;font-variant-numeric:tabular-nums}
+/* Arm toolbar */
+.arm-toolbar{display:flex;gap:4px;align-items:center}
+.arm-toolbar .btn{flex:1;padding:6px 4px;font-size:10px;letter-spacing:.05em}
+.arm-toolbar .badge{margin-left:4px}
 /* Arm joint row */
 .arm-joint-row{padding:4px 6px;background:#1a1610;border:1px solid var(--line);border-radius:1px}
 .arm-joint-row.uncalibrated{border-color:#ff7a6e;background:rgba(255,58,46,.04)}
@@ -2682,6 +2686,10 @@ svg.schem{width:100%;height:100%;display:block}
 
 /* ============ DECK ============ */
 .pane-deck{grid-area:deck}
+.pane-deck .panel-body{overflow-y:auto}
+.pane-side .panel-body{overflow-y:auto}
+/* tab content 也要让内部可滚 */
+.tab-content{min-height:0}
 .deck-status{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 auto}
 .stat-card{border:1px solid var(--line);padding:8px 10px;background:var(--panel);position:relative}
 .stat-card .stat-label{font-size:9px;color:var(--text-dim);letter-spacing:.2em;text-transform:uppercase}
@@ -3051,15 +3059,31 @@ svg.schem{width:100%;height:100%;display:block}
       </div><!-- /tab-drive -->
 
       <div class="tab-content" id="tab-arm" style="display:none">
-        <div class="deck-status" style="grid-template-columns:repeat(3,1fr)">
-          <div class="stat-card"><div class="stat-label">X mm</div><div class="stat-val" id="armX">--</div></div>
-          <div class="stat-card"><div class="stat-label">Y mm</div><div class="stat-val" id="armY">--</div></div>
-          <div class="stat-card"><div class="stat-label">Z mm</div><div class="stat-val" id="armZ">--</div></div>
+        <!-- 工具栏:torque / home / readback 一行 -->
+        <div class="arm-toolbar">
+          <button class="btn compact" id="btnArmTorque" title="OFF=可徒手扳;ON=锁紧持位且响应 move 命令">
+            ⚙ TORQUE <span class="badge" id="armTorqueBadge">OFF</span>
+          </button>
+          <button class="btn compact" data-arm-act="home" title="回开机时位置(startup positions),不是粗暴归零">⌂ HOME</button>
+          <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ→INPUT</button>
         </div>
 
+        <!-- JOINTS 主区,最常用 -->
         <div>
-          <div class="sec-label">CARTESIAN · ±10mm</div>
-          <div class="key-grid" style="grid-template-columns:repeat(3,1fr);grid-template-rows:48px 48px">
+          <div class="sec-label">JOINTS · INPUT DEG · NUDGE ±2°</div>
+          <div id="armJointGrid" style="display:grid;grid-template-columns:1fr;gap:3px;margin-top:4px"></div>
+          <div style="font-size:9px;color:var(--text-mute);margin-top:4px;letter-spacing:.05em">ENTER 提交 · DBLCLICK 填当前值 · 滚轮 → 滚页面 · 需 TORQUE=ON 才动</div>
+        </div>
+
+        <!-- 笛卡尔 / GRIPPER 折叠次区 -->
+        <details style="font-size:11px">
+          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► CARTESIAN END EFFECTOR · ±10mm</summary>
+          <div class="deck-status" style="grid-template-columns:repeat(3,1fr);margin-top:6px">
+            <div class="stat-card"><div class="stat-label">X mm</div><div class="stat-val" id="armX">--</div></div>
+            <div class="stat-card"><div class="stat-label">Y mm</div><div class="stat-val" id="armY">--</div></div>
+            <div class="stat-card"><div class="stat-label">Z mm</div><div class="stat-val" id="armZ">--</div></div>
+          </div>
+          <div class="key-grid" style="grid-template-columns:repeat(3,1fr);grid-template-rows:42px 42px;margin-top:6px">
             <div class="key" data-arm-nudge="x+">+X<small>FRONT</small></div>
             <div class="key" data-arm-nudge="z+">+Z<small>UP</small></div>
             <div class="key" data-arm-nudge="y+">+Y<small>LEFT</small></div>
@@ -3067,35 +3091,14 @@ svg.schem{width:100%;height:100%;display:block}
             <div class="key" data-arm-nudge="z-">−Z<small>DOWN</small></div>
             <div class="key" data-arm-nudge="y-">−Y<small>RIGHT</small></div>
           </div>
-        </div>
+        </details>
 
-        <div>
-          <div class="sec-label">GRIPPER · ±5°</div>
-          <div class="btn-row btn-2">
-            <button class="btn" data-arm-act="gripper-open"><span>◐ OPEN</span><span class="badge">+5°</span></button>
-            <button class="btn" data-arm-act="gripper-close"><span>◑ CLOSE</span><span class="badge">−5°</span></button>
+        <details style="font-size:11px">
+          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► GRIPPER · ±5°</summary>
+          <div class="btn-row btn-2" style="margin-top:6px">
+            <button class="btn compact" data-arm-act="gripper-open">◐ OPEN +5°</button>
+            <button class="btn compact" data-arm-act="gripper-close">◑ CLOSE −5°</button>
           </div>
-        </div>
-
-        <div class="btn-row btn-2">
-          <button class="btn" data-arm-act="home" title="回开机时位置(startup positions),不是粗暴归零"><span>⌂ HOME</span><span class="badge">→ STARTUP</span></button>
-          <div class="stat-card" style="text-align:left">
-            <div class="stat-label">STATUS</div>
-            <div class="stat-val" style="font-size:12px" id="armStatusLabel">—</div>
-          </div>
-        </div>
-
-        <div class="btn-row btn-2" style="margin-top:6px">
-          <button class="btn" id="btnArmTorque" title="OFF=可徒手扳;ON=锁紧持位且响应 move 命令">
-            <span>⚙ TORQUE</span><span class="badge" id="armTorqueBadge">OFF</span>
-          </button>
-          <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ → INPUT</button>
-        </div>
-
-        <details style="font-size:11px" open>
-          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► JOINTS · INPUT DEG · NUDGE ±2°</summary>
-          <div id="armJointGrid" style="display:grid;grid-template-columns:1fr;gap:3px;margin-top:6px"></div>
-          <div style="font-size:9px;color:var(--text-mute);margin-top:4px;letter-spacing:.1em">INPUT: ENTER 提交 · DBLCLICK 填充当前值 · 需 TORQUE=ON 才实际动</div>
         </details>
 
         <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
