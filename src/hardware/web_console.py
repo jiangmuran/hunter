@@ -149,10 +149,20 @@ class CameraStreamer:
     def _loop(self):
         delay = 1.0 / max(1.0, self.target_fps)
         fail_streak = 0
-        FAIL_THRESHOLD = 15      # 连续这么多帧失败就触发重连
-        RECONNECT_BACKOFF = 2.0   # 重连失败后等多久再试
+        FAIL_THRESHOLD = 15        # 连续这么多帧失败就触发重连
+        RECONNECT_BACKOFF = 2.0    # 重连失败后等多久再试
+        WATCHDOG_S = 5.0           # 超过这么多秒无新帧 → 强制 reopen(USB 断开后 read() 可能 hang 不增 streak)
+        self.last_frame_t = time.time()  # 启动时 seed 避免 watchdog 立即触发
         while self.running:
             t0 = time.time()
+            # Time-based watchdog:read 可能 hang 不返回,streak 不增长 → 用时间判定
+            if (time.time() - self.last_frame_t) > WATCHDOG_S:
+                self.error = f"watchdog: no frame {time.time()-self.last_frame_t:.1f}s, reopening"
+                self._reopen()
+                self.last_frame_t = time.time()  # reset 防止反复触发
+                fail_streak = 0
+                time.sleep(RECONNECT_BACKOFF)
+                continue
             try:
                 ok, frame = (self.cap.read() if self.cap is not None else (False, None))
             except Exception as e:
@@ -3247,6 +3257,23 @@ svg.schem{width:100%;height:100%;display:block}
     });
   }
   rebindCamImgs();
+  // Frontend watchdog:每 5 秒检查每个 cam img,naturalWidth==0 或 complete=false 时强制
+  // reset src(MJPEG 长连接在浏览器端有时静默卡死,onerror 不触发 → img 一直黑)
+  setInterval(() => {
+    document.querySelectorAll('.cam-frame').forEach(fr => {
+      const cid = fr.dataset.cam;
+      const img = fr.querySelector('.cam-img');
+      const err = fr.querySelector('.cam-overlay-err');
+      if (!cid || !img) return;
+      // 隐藏的 frame (single layout 副) 跳过
+      if (fr.offsetParent === null) return;
+      const broken = (!img.complete) || img.naturalWidth === 0;
+      if (broken){
+        if (err) err.style.display = 'flex';
+        img.src = `/api/camera/${cid}/stream.mjpg?t=${Date.now()}`;
+      }
+    });
+  }, 5000);
 
   // ============ Multi-cam config (layout + main) ============
   const CAM_LAYOUT_KEY = 'camLayout';
@@ -4471,6 +4498,8 @@ svg.schem{width:100%;height:100%;display:block}
               const lim = checkLimit(v);
               inp.style.color = lim ? '#ff7a6e' : 'var(--cyan)';
             });
+            // 滚轮 = 让页面正常滚,不调整数值(默认 number input 滚轮改值很烦人)
+            inp.addEventListener('wheel', ev => { inp.blur(); }, {passive:true});
             inp.addEventListener('keydown', ev => { if (ev.key === 'Enter'){ ev.preventDefault(); send(); inp.blur(); }});
             inp.addEventListener('blur', () => { if (inp.value !== '') send(); });
             // 双击输入框 = 用当前角度填充
