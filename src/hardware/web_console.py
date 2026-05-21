@@ -123,6 +123,7 @@ class CameraStreamer:
         self.error: str | None = None
         self.lock = threading.Lock()
         self._fps_window = deque(maxlen=30)
+        self.flipped = False  # 正反颠倒(H+V 同时翻 = 180° 旋转)
 
     def start(self) -> bool:
         try:
@@ -180,6 +181,9 @@ class CameraStreamer:
                 continue
             fail_streak = 0
             self.error = None
+            # 正反颠倒(180° 旋转 = H + V 翻转 = cv2.flip(_, -1))
+            if self.flipped:
+                frame = cv2.flip(frame, -1)
             try:
                 ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
             except Exception as e:
@@ -1255,6 +1259,13 @@ async def lifespan(app: FastAPI):
     camera = cameras.get(app.state.main_cam_id) if app.state.main_cam_id else None
     if camera is None:
         push_log("boot: no camera detected", "sys")
+    # restore persisted cam state (main_id + flipped per cam)
+    try:
+        _load_cam_state()
+        flipped_summary = ",".join(f"{cid}={'flip' if cs.flipped else 'norm'}" for cid, cs in cameras.items() if cs)
+        push_log(f"boot: cam state restored ({flipped_summary})", "sys")
+    except Exception as e:
+        push_log(f"boot: cam state load failed: {e}", "sys")
 
     push_log("boot: initializing YOLO", "sys")
     if not _yolo_ok:
@@ -2449,26 +2460,75 @@ async def camera_list():
             "device": (cs.device if cs else None),
             "fps": round(cs.fps(), 1) if cs else 0.0,
             "frame_age_ms": int((time.time() - cs.last_frame_t) * 1000) if (cs and cs.last_frame_t) else None,
+            "flipped": bool(getattr(cs, "flipped", False)) if cs else False,
             "error": (cs.error if cs else "not initialized"),
         })
     return {"cameras": out, "main_id": main}
 
 
-@app.post("/api/camera/config", tags=["camera"], summary="设置主 cam",
-          description='body: `{"main_id": "a" | "b" | ...}`. 主 cam 影响:兼容 `/api/camera/stream.mjpg` 走哪个、YOLO 推理输入、REAR CAM mirror 默认作用对象。')
+CAM_STATE_FILE = "/home/pi/.config/robot-console/cam_state.json"
+
+def _save_cam_state():
+    """持久化 main_id + 每个 cam 的 flipped 状态。"""
+    cams = getattr(app.state, "cameras", {}) or {}
+    state_obj = {
+        "main_id": getattr(app.state, "main_cam_id", None),
+        "cams": {cid: {"flipped": bool(getattr(cs, "flipped", False))} for cid, cs in cams.items() if cs},
+    }
+    try:
+        os.makedirs(os.path.dirname(CAM_STATE_FILE), exist_ok=True)
+        with open(CAM_STATE_FILE, "w") as f:
+            json.dump(state_obj, f, indent=2)
+    except Exception as e:
+        push_log(f"cam_state save failed: {e}", "sys")
+
+def _load_cam_state():
+    """启动时 apply state 到当前 cam streamer。"""
+    if not os.path.exists(CAM_STATE_FILE): return
+    try:
+        with open(CAM_STATE_FILE) as f: state_obj = json.load(f)
+    except Exception: return
+    cams = getattr(app.state, "cameras", {}) or {}
+    for cid, info in (state_obj.get("cams") or {}).items():
+        cs = cams.get(cid)
+        if cs and isinstance(info, dict):
+            cs.flipped = bool(info.get("flipped", False))
+    # 主 cam:仅当 saved id 仍 alive 时切
+    saved_main = state_obj.get("main_id")
+    if saved_main and cams.get(saved_main):
+        app.state.main_cam_id = saved_main
+        global camera
+        camera = cams[saved_main]
+
+
+@app.post("/api/camera/config", tags=["camera"], summary="设置主 cam / 翻转",
+          description='body 任意字段:\n- `main_id`: a/b/... 切主 cam\n- `cam_id` + `flipped`: 单个 cam 设置 180° 颠倒(H+V flip,服务端 cv2.flip)\n所有修改自动 persist 到 /home/pi/.config/robot-console/cam_state.json,开机重启保留。')
 async def camera_config(req: Request):
     body = await req.json()
     cams = getattr(app.state, "cameras", {}) or {}
-    new_main = body.get("main_id")
-    if new_main not in cams:
-        raise HTTPException(400, f"unknown cam id {new_main}; available: {list(cams.keys())}")
-    if cams.get(new_main) is None:
-        raise HTTPException(400, f"cam {new_main} not alive")
-    app.state.main_cam_id = new_main
-    global camera
-    camera = cams[new_main]
-    push_log(f"main cam → {new_main}", "sys")
-    return {"ok": True, "main_id": new_main}
+    changed = False
+    if "main_id" in body:
+        new_main = body["main_id"]
+        if new_main not in cams:
+            raise HTTPException(400, f"unknown cam id {new_main}; available: {list(cams.keys())}")
+        if cams.get(new_main) is None:
+            raise HTTPException(400, f"cam {new_main} not alive")
+        app.state.main_cam_id = new_main
+        global camera
+        camera = cams[new_main]
+        push_log(f"main cam → {new_main}", "sys")
+        changed = True
+    if "cam_id" in body and "flipped" in body:
+        cid = body["cam_id"]
+        cs = cams.get(cid)
+        if cs is None:
+            raise HTTPException(400, f"cam {cid} not available")
+        cs.flipped = bool(body["flipped"])
+        push_log(f"cam_{cid} flipped={cs.flipped}", "sys")
+        changed = True
+    if changed: _save_cam_state()
+    return {"ok": True, "main_id": getattr(app.state, "main_cam_id", None),
+            "cams": {cid: {"flipped": getattr(cs, "flipped", False)} for cid, cs in cams.items() if cs}}
 
 
 # ====================== WebSocket ======================
@@ -2722,6 +2782,13 @@ header::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:1px
 .cam-id-tag{position:absolute;top:4px;left:6px;font-family:var(--font-tech);font-size:9px;
   letter-spacing:.2em;color:var(--amber);background:rgba(0,0,0,.55);padding:2px 6px;z-index:4;
   border:1px solid rgba(111,214,133,.3)}
+.cam-flip-btn{position:absolute;top:4px;right:6px;width:22px;height:22px;
+  font-family:var(--font-tech);font-size:14px;line-height:18px;
+  background:rgba(0,0,0,.6);color:var(--text-dim);border:1px solid var(--line2);
+  cursor:pointer;z-index:5;padding:0;text-align:center}
+.cam-flip-btn:hover{color:var(--amber);border-color:var(--amber);background:rgba(111,214,133,.18)}
+.cam-flip-btn.on{color:var(--amber);border-color:var(--amber);background:rgba(111,214,133,.28);
+  box-shadow:inset 0 0 6px rgba(111,214,133,.4)}
 .cam-frame.primary .cam-id-tag{border-color:var(--amber);background:rgba(111,214,133,.15)}
 /* layout / main 配置控件 */
 .cam-cfg-row{display:flex;gap:6px;align-items:center;font-family:var(--font-mono);font-size:10px;color:var(--text-dim);letter-spacing:.1em}
@@ -2945,6 +3012,7 @@ svg.schem{width:100%;height:100%;display:block}
           <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
           <div class="cam-corner bl"></div><div class="cam-corner br"></div>
           <div class="cam-id-tag" id="camTagA">CAM_A · MAIN</div>
+          <button class="cam-flip-btn" data-cam-flip="a" title="正反颠倒 (180° H+V flip · 服务端 cv2.flip)·开机保留">⟲</button>
           <div class="cam-meta" id="camOSD">CAM_01 · 640x480</div>
           <div class="cam-rec"><div class="recdot"></div>LIVE</div>
           <div class="cam-overlay-err" id="camErr" style="display:none">NO_SIGNAL</div>
@@ -2954,6 +3022,7 @@ svg.schem{width:100%;height:100%;display:block}
           <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
           <div class="cam-corner bl"></div><div class="cam-corner br"></div>
           <div class="cam-id-tag" id="camTagB">CAM_B</div>
+          <button class="cam-flip-btn" data-cam-flip="b" title="正反颠倒 (180° H+V flip · 服务端 cv2.flip)·开机保留">⟲</button>
           <div class="cam-overlay-err" id="camErrB" style="display:none">NO_SIGNAL</div>
         </div>
       </div>
@@ -3469,6 +3538,9 @@ svg.schem{width:100%;height:100%;display:block}
         opt.textContent = `CAM_${c.id.toUpperCase()}${c.ok ? '' : ' · DOWN'}`;
         if (c.is_main) opt.selected = true;
         sel.appendChild(opt);
+        // sync flip 按钮状态
+        const flipBtn = document.querySelector(`.cam-flip-btn[data-cam-flip="${c.id}"]`);
+        if (flipBtn) flipBtn.classList.toggle('on', c.flipped);
       });
       // 只有 1 个 cam 时隐藏副 frame + main select
       const camCount = (d.cameras || []).filter(c => c.ok).length;
@@ -3496,6 +3568,19 @@ svg.schem{width:100%;height:100%;display:block}
     const newMain = ev.target.value;
     try { await fetch('/api/camera/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({main_id: newMain})}); } catch(e){}
     setPrimaryCam(newMain);
+  });
+  // 翻转按钮 click → POST flipped toggle + 状态切回(server-side cv2.flip 真翻 frame)
+  document.querySelectorAll('.cam-flip-btn').forEach(b => {
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const cid = b.dataset.camFlip;
+      const next = !b.classList.contains('on');
+      try {
+        const r = await fetch('/api/camera/config', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({cam_id: cid, flipped: next})});
+        if (r.ok) b.classList.toggle('on', next);
+      } catch(e){}
+    });
   });
   // PIP 模式下 click 副 frame = swap main
   document.addEventListener('click', ev => {
