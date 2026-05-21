@@ -1515,28 +1515,60 @@ async def arm_status():
 
 
 @app.post("/api/arm/home", tags=["arm"], summary="回 HOME 位置",
-          description=("默认 HOME = 启动时读到的位置(startup_positions_deg),这样开机摆好的姿态就是安全 home,不会粗暴全部归零。\n"
-                       "query `?mode=zero` 强制走全 0(危险,需先确认 limit 范围)。"
+          description=("HOME 优先级:1) arm_meta.json 的 `_home_positions_deg` 用户标定 2) 启动时 startup_positions_deg 3) 全 0\n"
+                       "query `?mode=zero` 强制全 0 / `?mode=startup` 启动位置 / 默认 user (meta 里的)"
                        "body 可选 `speed_deg_s` 覆盖默认速度。"))
-async def arm_home(req: Request, mode: str = "startup"):
+async def arm_home(req: Request, mode: str = "user"):
     if arm is None: raise HTTPException(503, "arm not ready")
     body = await req.json() if int(req.headers.get("content-length", "0") or 0) > 0 else {}
     speed = body.get("speed_deg_s")
+    # 从 arm_meta.json 读 _home_positions_deg
+    meta_path = os.path.expanduser("~/Desktop/arm_meta.json")
+    user_home = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f: m = json.load(f)
+            user_home = m.get("_home_positions_deg") or {}
+        except Exception: pass
     def _do():
         with arm_lock:
             if mode == "zero":
-                return arm.home(speed_deg_s=speed)  # controller.home() 走全 0
-            # 默认 mode=startup:走启动时位置
-            targets = arm.startup_positions_deg
+                return arm.home(speed_deg_s=speed)
+            if mode == "user" and user_home:
+                return arm.move_joints(user_home, speed_deg_s=speed)
+            # startup fallback
+            targets = arm.startup_positions_deg or {}
             if not targets:
-                # 兜底:启动位置为空(理论不会发生)→ 全 0
                 return arm.home(speed_deg_s=speed)
             return arm.move_joints(targets, speed_deg_s=speed)
     try:
         result = await asyncio.to_thread(_do)
-        return {"ok": True, "mode": mode, "targets": (arm.startup_positions_deg if mode != "zero" else {n: 0.0 for n in arm.startup_positions_deg}), "goals": result}
+        effective = (user_home if mode == "user" and user_home else
+                     (arm.startup_positions_deg if mode != "zero" else {n: 0.0 for n in (arm.startup_positions_deg or {})}))
+        return {"ok": True, "mode": mode, "targets": effective, "goals": result}
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/save_home", tags=["arm"], summary="把当前位置存为 HOME 目标",
+          description="把所有 joint 当前 present_position 写到 arm_meta.json 的 `_home_positions_deg`,以后 /api/arm/home (默认 mode=user) 会回这里。")
+async def arm_save_home():
+    if arm is None: raise HTTPException(503, "arm not ready")
+    meta_path = os.path.expanduser("~/Desktop/arm_meta.json")
+    def _do():
+        with arm_lock:
+            return arm.read_present_positions_deg()
+    try:
+        positions = await asyncio.to_thread(_do)
+        m = {}
+        if os.path.exists(meta_path):
+            with open(meta_path) as f: m = json.load(f)
+        m["_home_positions_deg"] = {k: round(float(v), 2) for k, v in positions.items()}
+        with open(meta_path, "w") as f: json.dump(m, f, indent=2, ensure_ascii=False)
+        push_log(f"home position saved: {m['_home_positions_deg']}", "sys")
+        return {"ok": True, "home_positions_deg": m["_home_positions_deg"]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.get("/api/arm/meta", tags=["arm"], summary="关节元信息(描述 + 限位 + 校准状态)",
@@ -3063,12 +3095,13 @@ svg.schem{width:100%;height:100%;display:block}
       </div><!-- /tab-drive -->
 
       <div class="tab-content" id="tab-arm" style="display:none">
-        <!-- 工具栏:torque / home / readback 一行 -->
+        <!-- 工具栏:torque / home / save_home / readback 一行 -->
         <div class="arm-toolbar">
           <button class="btn compact" id="btnArmTorque" title="OFF=可徒手扳;ON=锁紧持位且响应 move 命令">
             ⚙ TORQUE <span class="badge" id="armTorqueBadge">OFF</span>
           </button>
-          <button class="btn compact" data-arm-act="home" title="回开机时位置(startup positions),不是粗暴归零">⌂ HOME</button>
+          <button class="btn compact" data-arm-act="home" title="回到 arm_meta.json 里 _home_positions_deg 标定的回正姿态">⌂ HOME</button>
+          <button class="btn compact" id="btnSaveHome" title="把当前 6 个 joint 位置存为新 HOME 目标(写入 arm_meta.json)">💾 SAVE HOME</button>
           <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ→INPUT</button>
         </div>
         <!-- 实测 limit 校准工具(临时) -->
@@ -4648,6 +4681,30 @@ svg.schem{width:100%;height:100%;display:block}
         }
       } catch(e){}
       btnArmTorque.disabled = false;
+    });
+  }
+  // SAVE HOME:把当前 6 个 joint 位置存为 home 目标
+  const btnSaveHome = $('#btnSaveHome');
+  if (btnSaveHome){
+    btnSaveHome.addEventListener('click', async () => {
+      if (!confirm('把当前所有 joint 位置存为新 HOME 目标?以后按 ⌂ HOME 会回到这里。')) return;
+      btnSaveHome.disabled = true;
+      btnSaveHome.textContent = 'SAVING...';
+      try {
+        const r = await fetch('/api/arm/save_home', {method:'POST'});
+        const d = await r.json();
+        if (r.ok){
+          btnSaveHome.textContent = '✓ SAVED';
+          setTimeout(() => { btnSaveHome.textContent = '💾 SAVE HOME'; btnSaveHome.disabled = false; }, 1500);
+          console.log('home saved:', d.home_positions_deg);
+        } else {
+          btnSaveHome.textContent = '✗ ERR';
+          setTimeout(() => { btnSaveHome.textContent = '💾 SAVE HOME'; btnSaveHome.disabled = false; }, 1500);
+        }
+      } catch(e){
+        btnSaveHome.textContent = '✗ ERR';
+        setTimeout(() => { btnSaveHome.textContent = '💾 SAVE HOME'; btnSaveHome.disabled = false; }, 1500);
+      }
     });
   }
   // 把当前实际角度填到所有 joint input
