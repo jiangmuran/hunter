@@ -1274,7 +1274,10 @@ async def lifespan(app: FastAPI):
         try:
             yolo = YOLOInferencer(
                 model_path=DEFAULT_YOLO_MODEL,
-                get_jpeg_fn=(lambda: camera.get_jpeg()) if camera else (lambda: (None, 0)),
+                # 每次 loop 调时 dynamic 拿当前主 cam(切换 main_id 后 yolo 跟随切 source)。
+                # 原来用 `lambda: camera.get_jpeg()` 闭包到 global camera 仍 work,但启动时
+                # camera 可能是 None 走 fallback,且 global rebind 在某些 import order 下不稳。
+                get_jpeg_fn=lambda: (_get_cam().get_jpeg() if _get_cam() is not None else (None, 0)),
                 on_detection=lambda payload: bcast({"type": "yolo", "data": payload}),
             )
             if yolo.start():
