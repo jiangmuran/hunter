@@ -2553,6 +2553,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .arm-joint-name{color:var(--text-dim);letter-spacing:.15em;font-weight:600;min-width:28px}
 .arm-joint-desc{flex:1;color:var(--amber);font-size:10px;letter-spacing:.08em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .arm-joint-limit{color:var(--text-mute);font-size:9px;font-family:var(--font-tech);letter-spacing:.05em}
+.arm-obs{color:#7fff5a;font-size:9px;font-family:var(--font-tech);letter-spacing:.05em;margin-left:6px;border-left:1px solid var(--line2);padding-left:6px}
 .arm-joint-ctrl{display:grid;grid-template-columns:54px 1fr 24px 24px;gap:4px;align-items:center;font-family:var(--font-mono);font-size:10px}
 .arm-joint-val{color:var(--amber);text-align:right;font-family:var(--font-tech);font-size:11px}
 .arm-joint-input{width:100%;background:#1a1610;border:1px solid var(--line2);color:var(--cyan);font-family:var(--font-mono);font-size:11px;padding:2px 4px;text-align:right;transition:border-color .15s,background .15s,color .15s}
@@ -3069,6 +3070,11 @@ svg.schem{width:100%;height:100%;display:block}
           </button>
           <button class="btn compact" data-arm-act="home" title="回开机时位置(startup positions),不是粗暴归零">⌂ HOME</button>
           <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ→INPUT</button>
+        </div>
+        <!-- 实测 limit 校准工具(临时) -->
+        <div class="arm-toolbar" style="margin-top:4px">
+          <button class="btn compact" id="btnExportObs" title="导出所有 joint 浏览器记录的实测 min/max 为 JSON · 复制到剪贴板">📋 EXPORT MIN/MAX</button>
+          <button class="btn compact" id="btnResetObs" title="清空浏览器记录(LocalStorage)">RESET OBS</button>
         </div>
 
         <!-- JOINTS 主区,最常用 -->
@@ -4445,7 +4451,8 @@ svg.schem{width:100%;height:100%;display:block}
                 <div class="arm-joint-head">
                   <span class="arm-joint-name">${shortName}</span>
                   <span class="arm-joint-desc" title="${descTitle}">${desc || '—'}</span>
-                  <span class="arm-joint-limit">${limitTxt}${calibrated ? '' : ' ⚠'}</span>
+                  <span class="arm-joint-limit" title="config 配置 limit">${limitTxt}${calibrated ? '' : ' ⚠'}</span>
+                  <span class="arm-obs" data-joint-obs="${name}" title="浏览器记录的实测 min~max(LocalStorage)">— ~ —°</span>
                 </div>
                 <div class="arm-joint-ctrl">
                   <span class="arm-joint-val" data-joint="${name}">—</span>
@@ -4537,11 +4544,12 @@ svg.schem{width:100%;height:100%;display:block}
             });
           });
         }
-        // 更新 joint values
+        // 更新 joint values + 实测 observed min/max
         if (grid){
           for (const [name, deg] of Object.entries(s.present_positions_deg)){
             const el = grid.querySelector(`[data-joint="${name}"]`);
             if (el) el.textContent = deg.toFixed(1) + '°';
+            updateObserved(name, deg);
           }
         }
       }
@@ -4556,7 +4564,73 @@ svg.schem{width:100%;height:100%;display:block}
       (d.joints || []).forEach(j => { window.armMetaMap[j.name] = j; });
     } catch(e){}
   }
-  loadArmMeta().then(() => { loadArmStatus(); setInterval(loadArmStatus, 3000); });
+
+  // ============ Observed min/max (实测 limit 校准工具) ============
+  const OBS_KEY = 'armJointObserved';
+  window.armObserved = JSON.parse(localStorage.getItem(OBS_KEY) || '{}');
+  function fmtObs(o){ return o ? `${o.min.toFixed(1)} ~ ${o.max.toFixed(1)}°` : '— ~ —°'; }
+  function renderObsUI(){
+    document.querySelectorAll('.arm-obs').forEach(el => {
+      el.textContent = fmtObs(window.armObserved[el.dataset.jointObs]);
+    });
+  }
+  function updateObserved(name, deg){
+    if (isNaN(deg) || !isFinite(deg)) return;
+    const cur = window.armObserved[name];
+    let changed = false;
+    if (!cur){
+      window.armObserved[name] = {min: deg, max: deg};
+      changed = true;
+    } else {
+      if (deg < cur.min){ cur.min = deg; changed = true; }
+      if (deg > cur.max){ cur.max = deg; changed = true; }
+    }
+    if (changed){
+      localStorage.setItem(OBS_KEY, JSON.stringify(window.armObserved));
+      const el = document.querySelector(`.arm-obs[data-joint-obs="${name}"]`);
+      if (el) el.textContent = fmtObs(window.armObserved[name]);
+    }
+  }
+  // Export / Reset handlers
+  function bindObsButtons(){
+    const exp = document.getElementById('btnExportObs');
+    const rst = document.getElementById('btnResetObs');
+    if (exp && !exp.dataset.bound){
+      exp.dataset.bound = '1';
+      exp.addEventListener('click', async () => {
+        const out = {};
+        Object.entries(window.armObserved).forEach(([name, o]) => {
+          out[name] = {min_deg: Math.round(o.min * 10) / 10, max_deg: Math.round(o.max * 10) / 10};
+        });
+        const text = JSON.stringify(out, null, 2);
+        try { await navigator.clipboard.writeText(text); } catch(e){}
+        // 弹窗显示让用户能看 + 复制(clipboard 不一定 work)
+        const w = window.open('', '_blank', 'width=500,height=600');
+        if (w){
+          w.document.write(`<pre style="font-family:JetBrains Mono,monospace;font-size:13px;padding:16px;background:#1a1610;color:#ffb000">${text.replace(/</g,'&lt;')}</pre>`);
+          w.document.title = 'arm joint observed min/max';
+        } else {
+          alert('已复制到剪贴板:\n\n' + text);
+        }
+      });
+    }
+    if (rst && !rst.dataset.bound){
+      rst.dataset.bound = '1';
+      rst.addEventListener('click', () => {
+        if (!confirm('清空所有 joint 的浏览器实测 min/max 记录?')) return;
+        window.armObserved = {};
+        localStorage.removeItem(OBS_KEY);
+        document.querySelectorAll('.arm-obs').forEach(el => el.textContent = '— ~ —°');
+      });
+    }
+  }
+
+  loadArmMeta().then(() => {
+    loadArmStatus();
+    setInterval(loadArmStatus, 3000);
+    // grid 是在 loadArmStatus 第一次执行时构建,稍等再 bind + render
+    setTimeout(() => { renderObsUI(); bindObsButtons(); }, 500);
+  });
 
   // ARM torque toggle
   let armTorqueOn = false;
