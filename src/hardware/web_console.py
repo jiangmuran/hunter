@@ -1565,6 +1565,38 @@ async def arm_nudge_joint(req: Request):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/arm/move_joint", tags=["arm"], summary="单关节绝对角度",
+          description="body: `{joint: 'joint_1', target_deg: float, speed_deg_s?: float}`")
+async def arm_move_joint(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    def _do():
+        with arm_lock:
+            return arm.move_joint(body["joint"], float(body["target_deg"]), speed_deg_s=body.get("speed_deg_s"))
+    try:
+        goal = await asyncio.to_thread(_do)
+        return {"ok": True, "joint": body["joint"], "goal_raw": goal}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/torque", tags=["arm"], summary="开/关 servo torque(锁紧)",
+          description='body: `{on: true/false}`. 关 → 可徒手扳动;开 → servo 锁紧持位且响应 move 命令')
+async def arm_torque(req: Request):
+    if arm is None or arm.bus is None: raise HTTPException(503, "arm not ready")
+    body = await req.json()
+    on = bool(body.get("on", True))
+    def _do():
+        with arm_lock:
+            if on: arm.bus.enable_torque()
+            else: arm.bus.disable_torque()
+    try:
+        await asyncio.to_thread(_do)
+        return {"ok": True, "torque_on": on}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/api/arm/gripper", tags=["arm"], summary="夹爪开/合(增量)",
           description="body: `{delta_deg: float, speed_deg_s?: float}`。正值通常 open,负值 close。")
 async def arm_gripper(req: Request):
@@ -2743,7 +2775,8 @@ svg.schem{width:100%;height:100%;display:block}
         </div>
       </div>
 
-      <div class="cam-cfg-row" style="margin-top:4px">
+      <div class="sec-label" style="margin-top:6px">MULTI-CAM · LAYOUT</div>
+      <div class="cam-cfg-row">
         <span>LAYOUT</span>
         <select id="camLayoutSel">
           <option value="layout-side">SIDE×SIDE</option>
@@ -2758,8 +2791,8 @@ svg.schem{width:100%;height:100%;display:block}
       <div class="btn-row btn-2">
         <button class="btn" id="btnMirror"><span>⟷ REAR CAM</span><span class="badge" id="mirrorBadge">OFF</span></button>
         <div class="stat-card" style="text-align:left">
-          <div class="stat-label">VIEW</div>
-          <div class="stat-val" style="font-size:13px" id="viewLabel">VEHICLE</div>
+          <div class="stat-label">MAIN CAM</div>
+          <div class="stat-val" style="font-size:13px" id="viewLabel">CAM_A</div>
         </div>
       </div>
 
@@ -2983,9 +3016,17 @@ svg.schem{width:100%;height:100%;display:block}
           </div>
         </div>
 
-        <details style="font-size:11px">
-          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► JOINTS · ±2°</summary>
+        <div class="btn-row btn-2" style="margin-top:6px">
+          <button class="btn" id="btnArmTorque" title="OFF=可徒手扳;ON=锁紧持位且响应 move 命令">
+            <span>⚙ TORQUE</span><span class="badge" id="armTorqueBadge">OFF</span>
+          </button>
+          <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ → INPUT</button>
+        </div>
+
+        <details style="font-size:11px" open>
+          <summary class="sec-label" style="cursor:pointer;list-style-position:inside">► JOINTS · INPUT DEG · NUDGE ±2°</summary>
           <div id="armJointGrid" style="display:grid;grid-template-columns:1fr;gap:3px;margin-top:6px"></div>
+          <div style="font-size:9px;color:var(--text-mute);margin-top:4px;letter-spacing:.1em">INPUT: ENTER 提交 · DBLCLICK 填充当前值 · 需 TORQUE=ON 才实际动</div>
         </details>
 
         <button class="btn btn-danger" data-action="emergency">EMERGENCY STOP</button>
@@ -3376,12 +3417,16 @@ svg.schem{width:100%;height:100%;display:block}
     document.querySelectorAll('.cam-frame').forEach(fr => fr.classList.remove('mirror'));
     const primary = document.querySelector('.cam-frame.primary');
     if (primary && rearMode) primary.classList.add('mirror');
+    // viewLabel 跟主 cam id 联动:CAM_A · REAR / CAM_B 等
+    const lbl = $('#viewLabel');
+    if (lbl){
+      const mainId = (primary?.dataset.cam || 'a').toUpperCase();
+      lbl.textContent = `CAM_${mainId}${rearMode ? ' · REAR' : ''}`;
+    }
     const btn = $('#btnMirror');
     if (btn) btn.classList.toggle('on', rearMode);
     const badge = $('#mirrorBadge');
     if (badge) badge.textContent = rearMode ? 'ON' : 'OFF';
-    const lbl = $('#viewLabel');
-    if (lbl) lbl.textContent = rearMode ? 'CAMERA' : 'VEHICLE';
   }
   function toggleRearMode(){
     // 切换前先停止所有 hold,避免 stopHold(反转后) 找不到 timer 残留
@@ -4290,9 +4335,11 @@ svg.schem{width:100%;height:100%;display:block}
           let html = '';
           for (const name of Object.keys(s.present_positions_deg)){
             const shortName = name.replace('joint_','J').toUpperCase().replace('GRIPPER','GRIP');
-            html += `<div style="display:grid;grid-template-columns:46px 1fr 26px 26px;gap:4px;align-items:center;font-size:10px;font-family:var(--font-mono)">
+            html += `<div style="display:grid;grid-template-columns:38px 50px 60px 22px 22px;gap:3px;align-items:center;font-size:10px;font-family:var(--font-mono)">
               <span style="color:var(--text-dim);letter-spacing:.1em">${shortName}</span>
               <span class="arm-joint-val" data-joint="${name}" style="color:var(--amber);text-align:right;font-family:var(--font-tech)">—</span>
+              <input class="arm-joint-input" data-joint-input="${name}" type="number" step="1" placeholder="deg"
+                style="width:100%;background:#1a1610;border:1px solid var(--line2);color:var(--cyan);font-family:var(--font-mono);font-size:10px;padding:2px 4px;text-align:right">
               <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="-2">−</button>
               <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="2">+</button>
             </div>`;
@@ -4308,6 +4355,29 @@ svg.schem{width:100%;height:100%;display:block}
               } catch(e){}
             });
           });
+          // 绝对角度输入:Enter / blur 提交
+          grid.querySelectorAll('[data-joint-input]').forEach(inp => {
+            const send = async () => {
+              const v = parseFloat(inp.value);
+              if (isNaN(v)) return;
+              inp.style.borderColor = 'var(--amber)';
+              try {
+                const r = await fetch('/api/arm/move_joint', {
+                  method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({joint: inp.dataset.jointInput, target_deg: v}),
+                });
+                inp.style.borderColor = r.ok ? 'var(--green)' : '#ff3a2e';
+              } catch(e){ inp.style.borderColor = '#ff3a2e'; }
+              setTimeout(() => { inp.style.borderColor = ''; }, 800);
+            };
+            inp.addEventListener('keydown', ev => { if (ev.key === 'Enter'){ ev.preventDefault(); send(); inp.blur(); }});
+            inp.addEventListener('blur', () => { if (inp.value !== '') send(); });
+            // 双击输入框 = 用当前角度填充
+            inp.addEventListener('dblclick', () => {
+              const cur = grid.querySelector(`.arm-joint-val[data-joint="${inp.dataset.jointInput}"]`);
+              if (cur) inp.value = parseFloat(cur.textContent).toFixed(0);
+            });
+          });
         }
         // 更新 joint values
         if (grid){
@@ -4320,6 +4390,36 @@ svg.schem{width:100%;height:100%;display:block}
     } catch(e){}
   }
   loadArmStatus(); setInterval(loadArmStatus, 3000);
+
+  // ARM torque toggle
+  let armTorqueOn = false;
+  const btnArmTorque = $('#btnArmTorque');
+  if (btnArmTorque){
+    btnArmTorque.addEventListener('click', async () => {
+      const next = !armTorqueOn;
+      btnArmTorque.disabled = true;
+      try {
+        const r = await fetch('/api/arm/torque', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({on: next})});
+        if (r.ok){
+          armTorqueOn = next;
+          btnArmTorque.classList.toggle('on', armTorqueOn);
+          $('#armTorqueBadge').textContent = armTorqueOn ? 'ON · LOCKED' : 'OFF';
+        }
+      } catch(e){}
+      btnArmTorque.disabled = false;
+    });
+  }
+  // 把当前实际角度填到所有 joint input
+  const btnArmReadback = $('#btnArmReadback');
+  if (btnArmReadback){
+    btnArmReadback.addEventListener('click', () => {
+      document.querySelectorAll('[data-joint-input]').forEach(inp => {
+        const grid = $('#armJointGrid');
+        const cur = grid?.querySelector(`.arm-joint-val[data-joint="${inp.dataset.jointInput}"]`);
+        if (cur) inp.value = parseFloat(cur.textContent).toFixed(0);
+      });
+    });
+  }
 
   // ============ Log ============
   const MAX_LOG = 300;

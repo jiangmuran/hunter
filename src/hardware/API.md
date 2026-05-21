@@ -23,11 +23,29 @@
 | audio | GET | `/api/recordings` | 列出录音文件 |
 | audio | POST | `/api/audio/play` | 播放 wav |
 | audio | POST | `/api/audio/stop` | 停止播放 |
-| camera | GET | `/api/camera/stream.mjpg` | MJPEG 实时流 |
-| camera | GET | `/api/camera/snapshot.jpg` | 单帧 JPEG 快照 |
+| camera | GET | `/api/camera/list` | 所有 cam + 状态(多 cam 时枚举 a/b/c...) |
+| camera | GET | `/api/camera/stream.mjpg` | 主 cam MJPEG(兼容,等价 `/{main_id}/stream.mjpg`) |
+| camera | GET | `/api/camera/snapshot.jpg` | 主 cam 单帧 JPEG |
+| camera | GET | `/api/camera/{cam_id}/stream.mjpg` | 指定 cam MJPEG(cam_id ∈ a/b/...) |
+| camera | GET | `/api/camera/{cam_id}/snapshot.jpg` | 指定 cam 单帧 JPEG |
+| camera | POST | `/api/camera/config` | 切换主 cam (`{main_id}`) |
+| arm | GET | `/api/arm/status` | 机械臂状态(joint 角度 / 笛卡尔位置) |
+| arm | POST | `/api/arm/home` | 所有 joint 归零 |
+| arm | POST | `/api/arm/move_joint` | 单关节绝对角度 (`{joint, target_deg}`) |
+| arm | POST | `/api/arm/nudge_joint` | 单关节增量 (`{joint, delta_deg}`) |
+| arm | POST | `/api/arm/move_cartesian` | 末端绝对位置 (`{x,y,z}` 米) |
+| arm | POST | `/api/arm/nudge_cartesian` | 末端笛卡尔增量 |
+| arm | POST | `/api/arm/gripper` | 夹爪开/合增量 (`{delta_deg}`) |
+| arm | POST | `/api/arm/torque` | 开/关 servo 锁紧 (`{on}`) |
 | map | GET | `/api/map/state` | MiniMap pose + occupancy grid 快照 |
 | map | POST | `/api/map/reset` | 清空地图 + pose 归零 |
-| map | POST | `/api/map/config` | 标定速度模型常数 (k_linear / k_angular) |
+| map | POST | `/api/map/config` | 标定模型常数 (k_linear / k_angular / backward_ratio) |
+| rec | GET | `/api/rec/status` | 录制 / 回放状态 |
+| rec | POST | `/api/rec/start` | 开始录制(清空已有事件) |
+| rec | POST | `/api/rec/stop` | 停止录制 |
+| rec | POST | `/api/rec/clear` | 清空录制(idle 时) |
+| rec | POST | `/api/rec/play` | 开始回放 (`?direction=forward/reverse&speed&calibrate`) |
+| rec | POST | `/api/rec/stop_playback` | 终止回放 |
 | ws | WS | `/ws` | 实时事件推送 |
 
 ---
@@ -541,3 +559,142 @@ print("saved:", r["path"])
 
 ### Python 异步 + WS
 见上文 §5。
+
+---
+
+## 11. 多摄像头 (Multi-Camera)
+
+启动时 probe `/dev/video0..9`,把可 open + read 一帧成功的设备按枚举顺序赋 id `a/b/c/d`(上限 4)。默认主 cam = 第一个 alive 的。
+
+> ⚠️ 多 cam 同一 USB hub / controller 会因 isochronous 带宽 allocation **死锁**(即使总带宽 480Mbps 够),症状是 cam read() 永久 hang。解法:物理上分到 RPi 不同 USB 控制器(RPi 5 有 Bus 01 + Bus 03 两个独立 USB 2.0 controller)。
+
+### `GET /api/camera/list`
+返回所有 cam 状态。
+```json
+{
+  "cameras": [
+    {"id": "a", "is_main": true, "ok": true, "device": "/dev/video0", "fps": 12.0, "frame_age_ms": 47, "error": null},
+    {"id": "b", "is_main": false, "ok": true, "device": "/dev/video2", "fps": 12.0, "frame_age_ms": 34, "error": null}
+  ],
+  "main_id": "a"
+}
+```
+
+### `GET /api/camera/{cam_id}/stream.mjpg` 和 `/snapshot.jpg`
+取指定 cam 流。`cam_id` 是 `a/b/...`,跟 `/api/camera/list` 返回的一致。
+
+### `POST /api/camera/config`
+切换主 cam。
+```json
+POST /api/camera/config
+{"main_id": "b"}
+→ {"ok": true, "main_id": "b"}
+```
+切主后 `/api/camera/stream.mjpg`(兼容路径)指向新主;YOLO 推理 source 跟着切;`/api/health.modules.camera.detail` 报新 main。
+
+---
+
+## 12. 机械臂 (Arm — Sts3215 × 6 joints)
+
+依赖 `physical-agent` + `lerobot[feetech]`,通过 USB-serial(CDC ACM 或 CH340)连 Feetech 总线,**外部电源**给 servo 供电。Config 在 `~/Desktop/arm_config.json`。Joint 顺序:`joint_1..6`。
+
+### `GET /api/arm/status`
+关节角度 / 笛卡尔末端 / 启动 raw 位置等。
+
+### `POST /api/arm/torque`
+开/关 servo 锁紧。
+```json
+{"on": false}  // OFF 可徒手扳动
+{"on": true}   // ON  锁紧持位,响应 move 命令
+→ {"ok": true, "torque_on": true}
+```
+
+### `POST /api/arm/move_joint`
+单关节绝对角度。
+```json
+{"joint": "joint_2", "target_deg": 45.0, "speed_deg_s": 20}
+→ {"ok": true, "joint": "joint_2", "goal_raw": 2560}
+```
+
+### `POST /api/arm/nudge_joint`
+单关节相对增量。
+```json
+{"joint": "joint_3", "delta_deg": -2}
+```
+
+### `POST /api/arm/move_cartesian` / `nudge_cartesian`
+末端 xyz 米为单位(需要 urdf):
+```json
+{"x": 0.18, "y": 0.0, "z": 0.20}
+```
+
+### `POST /api/arm/home`
+所有 joint 走到零位。需 torque=ON。
+
+### `POST /api/arm/gripper`
+夹爪开/合增量(仅当 config 里有 gripper joint)。
+
+---
+
+## 13. 录制 / 回放 (Recording)
+
+内存录制(memory-only),记录所有 cmd 事件(`hold_down`/`hold_up`/`cmd`)+ 10 Hz 传感器快照(ultra / pose / speed)。max 10 分钟自动停。服务重启清空。
+
+### `GET /api/rec/status`
+```json
+{
+  "recording": false, "playing": false,
+  "event_count": 42, "total_events": 1023,
+  "duration_s": 15.5, "elapsed_s": 0.0,
+  "playback": null
+}
+```
+回放中 `playback` 是:
+```json
+{
+  "idx": 15, "total": 42, "elapsed": 7.8, "duration": 15.5,
+  "direction": "forward", "speed": 1.0, "calibrate": false,
+  "current": {"kind": "hold_down", "action": "forward"},
+  "trail_recorded": [...], "trail_replay": [...],
+  "ultra_recorded": {...}, "ultra_live": {...}, "ultra_diff_mm": {...}
+}
+```
+
+### `POST /api/rec/start`/`stop`/`clear`
+- `start`:清空已有事件,开始录制 + sensor 快照线程
+- `stop`:停止录制
+- `clear`:idle 时清空
+
+### `POST /api/rec/play`
+```
+POST /api/rec/play?direction=forward&speed=1.0&calibrate=0
+                  direction: forward / reverse
+                  speed: 0.1 - 5.0
+                  calibrate: 0/1 → 推送录制 vs 实时 ultra 偏差给 UI
+```
+**倒放语义**:
+- 整体事件逆序 + 每条 cmd 用 `INVERSE` 反映射(forward↔backward, left↔right, rotate_cw↔rotate_ccw, speed_up↔speed_down,音效原样)
+- `hold_down` ↔ `hold_up` 互换(反着走时间)
+- **事件级 timing 补偿**:倒放后的 backward 段(原 forward)duration ×1/`BACKWARD_RATIO`,forward 段(原 backward)duration ×`BACKWARD_RATIO`,后续事件 shift,让倒放距离匹配原前进。`BACKWARD_RATIO` 默认 0.7,可通过 `/api/map/config` 校准。
+
+### `POST /api/rec/stop_playback`
+立即终止当前回放,释放所有 hold + car.stop()。
+
+---
+
+## 14. 速度模型 / 标定 (Speed Model)
+
+`/api/map/config` 接受三个字段,影响 dead-reckoning + distance API + 倒放 timing:
+
+```json
+{
+  "k_linear": 0.05,        // mm/s per BUTTONSPEED. BS=2000 → 100mm/s
+  "k_angular": 0.0006,     // rad/s per BUTTONSPEED. BS=2000 → 1.2 rad/s ≈ 69°/s
+  "backward_ratio": 0.7    // 重心前置 → 后驱效率低,vB / vF
+}
+```
+
+**校准方法**:
+- `k_linear`:用 distance API 让车前进 1000mm,量实测距离,反推 k_linear = 实测 / 期望 × 旧值。
+- `backward_ratio`:车前进 X mm、然后后退 X mm,看是否回到原点。回不到则 ratio = 实际后退 / 实际前进。或录"直走 3 秒"倒放看回零情况。
+- `k_angular`:同 k_linear,用 `?angle=N` 测旋转。
