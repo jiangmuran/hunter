@@ -232,6 +232,9 @@ class CameraStreamer:
         return (time.time() - self.last_frame_t) < 3.0
 
     def fps(self) -> float:
+        # 如果 loop 已死(last_frame_t 老 >3s),fps 报 0 而不是用 stale deque
+        if self.last_frame_t and (time.time() - self.last_frame_t) > 3.0:
+            return 0.0
         with self.lock:
             w = list(self._fps_window)
         if len(w) < 2:
@@ -1223,6 +1226,8 @@ async def lifespan(app: FastAPI):
         cid = chr(ord('a') + len(cam_ids))
         cam_ids.append(cid)
         try:
+            # 两个 cam 分别接 RPi 不同 USB controller(Bus 01 / Bus 03)各自独立 480M
+            # 带宽,可以同时 640x480@12fps。同 hub / 同 controller 上跑会 isoch 死锁
             cs = CameraStreamer(device=path, width=640, height=480, fps=12, quality=65)
             if cs.start():
                 cameras[cid] = cs
