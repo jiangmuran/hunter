@@ -1550,6 +1550,35 @@ async def arm_home(req: Request, mode: str = "user"):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/arm/reset", tags=["arm"], summary="重置 arm controller(脱限位救援)",
+          description="disconnect 当前 controller → 重新 from_json 加载 config → connect()。会触发 servo 重新 configure + 读取 startup positions。不清 servo 内部 multi-turn 累计计数(要那个必须断电重启 servo bus)。")
+async def arm_reset():
+    global arm
+    if Sts3215ArmController is None: raise HTTPException(503, "controller class not available")
+    def _do():
+        global arm
+        # 不持 arm_lock(可能旧 controller 已 stuck),直接换新实例
+        old = arm
+        if old is not None:
+            try: old.disconnect()
+            except Exception: pass
+        try:
+            new_ctrl = Sts3215ArmController.from_json(ARM_CONFIG_PATH)
+            new_ctrl.connect()
+            arm = new_ctrl
+            return new_ctrl.startup_positions_deg
+        except Exception as e:
+            arm = None
+            raise
+    try:
+        positions = await asyncio.to_thread(_do)
+        push_log(f"arm reset → connected, positions: {positions}", "sys")
+        return {"ok": True, "positions": positions}
+    except Exception as e:
+        push_log(f"arm reset FAILED: {e}", "sys")
+        raise HTTPException(500, str(e))
+
+
 @app.post("/api/arm/save_home", tags=["arm"], summary="把当前位置存为 HOME 目标",
           description="把所有 joint 当前 present_position 写到 arm_meta.json 的 `_home_positions_deg`,以后 /api/arm/home (默认 mode=user) 会回这里。")
 async def arm_save_home():
@@ -3145,8 +3174,9 @@ svg.schem{width:100%;height:100%;display:block}
           <button class="btn compact" id="btnSaveHome" title="把当前 6 个 joint 位置存为新 HOME 目标(写入 arm_meta.json)">💾 SAVE HOME</button>
           <button class="btn compact" id="btnArmReadback" title="把当前实际角度填到所有 input 框">READ→INPUT</button>
         </div>
-        <!-- 实测 limit 校准工具(临时) -->
+        <!-- 实测 limit 校准工具 + 救援 -->
         <div class="arm-toolbar" style="margin-top:4px">
+          <button class="btn compact" id="btnArmReset" title="重置 arm controller(脱限位救援)· disconnect + 重新 from_json + connect。注意:不清 servo 内部 multi-turn 计数,要清那个需断电重启 servo 电源" style="border-color:var(--warn);color:var(--warn)">🔄 RESET ARM</button>
           <button class="btn compact" id="btnExportObs" title="导出所有 joint 浏览器记录的实测 min/max 为 JSON · 复制到剪贴板">📋 EXPORT MIN/MAX</button>
           <button class="btn compact" id="btnResetObs" title="清空浏览器记录(LocalStorage)">RESET OBS</button>
         </div>
@@ -4697,6 +4727,31 @@ svg.schem{width:100%;height:100%;display:block}
       if (el) el.textContent = fmtObs(window.armObserved[name]);
     }
   }
+  // RESET ARM — 脱限位救援
+  const btnArmReset = document.getElementById('btnArmReset');
+  if (btnArmReset){
+    btnArmReset.addEventListener('click', async () => {
+      if (!confirm('重置 arm controller?\n\n这会 disconnect 当前 lerobot 连接然后重新 from_json + connect。\nservo 物理状态(multi-turn 累计计数 / 过载错误)不会被清,要清那个必须断 servo 电源 5 秒再上电。\n\n现在的 limit 已经放到 ±360,reset 后能正常 move。')) return;
+      btnArmReset.disabled = true;
+      btnArmReset.textContent = '🔄 RESETTING...';
+      try {
+        const r = await fetch('/api/arm/reset', {method:'POST'});
+        const d = await r.json();
+        if (r.ok){
+          btnArmReset.textContent = '✓ RESET OK';
+          console.log('arm reset positions:', d.positions);
+          setTimeout(() => { btnArmReset.textContent = '🔄 RESET ARM'; btnArmReset.disabled = false; }, 2000);
+        } else {
+          btnArmReset.textContent = '✗ ' + (d.detail || 'ERR');
+          setTimeout(() => { btnArmReset.textContent = '🔄 RESET ARM'; btnArmReset.disabled = false; }, 3000);
+        }
+      } catch(e){
+        btnArmReset.textContent = '✗ ERR';
+        setTimeout(() => { btnArmReset.textContent = '🔄 RESET ARM'; btnArmReset.disabled = false; }, 3000);
+      }
+    });
+  }
+
   // Export / Reset handlers
   function bindObsButtons(){
     const exp = document.getElementById('btnExportObs');
