@@ -1504,15 +1504,59 @@ async def arm_status():
         return {"available": True, "connected": False, "error": str(e)}
 
 
-@app.post("/api/arm/home", tags=["arm"], summary="所有关节回零")
-async def arm_home(req: Request):
+@app.post("/api/arm/home", tags=["arm"], summary="回 HOME 位置",
+          description=("默认 HOME = 启动时读到的位置(startup_positions_deg),这样开机摆好的姿态就是安全 home,不会粗暴全部归零。\n"
+                       "query `?mode=zero` 强制走全 0(危险,需先确认 limit 范围)。"
+                       "body 可选 `speed_deg_s` 覆盖默认速度。"))
+async def arm_home(req: Request, mode: str = "startup"):
     if arm is None: raise HTTPException(503, "arm not ready")
     body = await req.json() if int(req.headers.get("content-length", "0") or 0) > 0 else {}
     speed = body.get("speed_deg_s")
     def _do():
         with arm_lock:
-            return arm.home(speed_deg_s=speed)
-    return await asyncio.to_thread(_do)
+            if mode == "zero":
+                return arm.home(speed_deg_s=speed)  # controller.home() 走全 0
+            # 默认 mode=startup:走启动时位置
+            targets = arm.startup_positions_deg
+            if not targets:
+                # 兜底:启动位置为空(理论不会发生)→ 全 0
+                return arm.home(speed_deg_s=speed)
+            return arm.move_joints(targets, speed_deg_s=speed)
+    try:
+        result = await asyncio.to_thread(_do)
+        return {"ok": True, "mode": mode, "targets": (arm.startup_positions_deg if mode != "zero" else {n: 0.0 for n in arm.startup_positions_deg}), "goals": result}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/arm/meta", tags=["arm"], summary="关节元信息(描述 + 限位 + 校准状态)",
+         description="UI 用:从 arm_config.json (joints/limits) + arm_meta.json (人类描述/calibrated) 拼。meta 文件可独立编辑,不影响 controller 加载。")
+async def arm_meta():
+    if arm is None: raise HTTPException(503, "arm not ready")
+    cfg_path = os.path.expanduser("~/Desktop/arm_config.json")
+    meta_path = os.path.expanduser("~/Desktop/arm_meta.json")
+    try:
+        with open(cfg_path) as f: cfg = json.load(f)
+    except Exception as e:
+        raise HTTPException(500, f"read config failed: {e}")
+    meta = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f: meta = json.load(f)
+        except Exception: pass
+    out = []
+    for j in cfg.get("joints", []):
+        name = j["name"]
+        m = meta.get(name) or {}
+        out.append({
+            "name": name,
+            "description": m.get("description", ""),
+            "calibrated": bool(m.get("calibrated", False)),
+            "min_deg": j.get("min_position_deg"),
+            "max_deg": j.get("max_position_deg"),
+            "motor_id": j.get("motor_id"),
+        })
+    return {"joints": out, "startup_positions_deg": arm.startup_positions_deg}
 
 
 @app.post("/api/arm/nudge_cartesian", tags=["arm"], summary="末端笛卡尔增量移动(米)",
@@ -2487,6 +2531,21 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:2;
 .rec-cal-row>span:nth-child(2){color:#5af0ff}
 .rec-cal-row>span:nth-child(3){color:#7fff5a}
 .rec-cal-row>span:last-child{color:var(--text-bright);text-align:right;font-variant-numeric:tabular-nums}
+/* Arm joint row */
+.arm-joint-row{padding:4px 6px;background:#1a1610;border:1px solid var(--line);border-radius:1px}
+.arm-joint-row.uncalibrated{border-color:#ff7a6e;background:rgba(255,58,46,.04)}
+.arm-joint-row.uncalibrated .arm-joint-limit{color:#ff7a6e}
+.arm-joint-head{display:flex;align-items:baseline;gap:6px;font-family:var(--font-mono);font-size:10px;margin-bottom:3px}
+.arm-joint-name{color:var(--text-dim);letter-spacing:.15em;font-weight:600;min-width:28px}
+.arm-joint-desc{flex:1;color:var(--amber);font-size:10px;letter-spacing:.08em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arm-joint-limit{color:var(--text-mute);font-size:9px;font-family:var(--font-tech);letter-spacing:.05em}
+.arm-joint-ctrl{display:grid;grid-template-columns:54px 1fr 24px 24px;gap:4px;align-items:center;font-family:var(--font-mono);font-size:10px}
+.arm-joint-val{color:var(--amber);text-align:right;font-family:var(--font-tech);font-size:11px}
+.arm-joint-input{width:100%;background:#1a1610;border:1px solid var(--line2);color:var(--cyan);font-family:var(--font-mono);font-size:11px;padding:2px 4px;text-align:right;transition:border-color .15s,background .15s,color .15s}
+.arm-joint-input:focus{outline:none;border-color:var(--amber)}
+.arm-joint-input:disabled{opacity:0.4;cursor:not-allowed;background:#0e0a06}
+.arm-nudge{padding:2px 0;font-size:11px;letter-spacing:0}
+
 #btnRecToggle.recording{background:rgba(255,58,46,.15);border-color:#ff3a2e;color:#ff7a6e}
 #btnRecToggle.recording::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff3a2e;margin-right:6px;animation:pulse 1s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
@@ -3009,7 +3068,7 @@ svg.schem{width:100%;height:100%;display:block}
         </div>
 
         <div class="btn-row btn-2">
-          <button class="btn" data-arm-act="home"><span>⌂ HOME</span><span class="badge">all zero</span></button>
+          <button class="btn" data-arm-act="home" title="回开机时位置(startup positions),不是粗暴归零"><span>⌂ HOME</span><span class="badge">→ STARTUP</span></button>
           <div class="stat-card" style="text-align:left">
             <div class="stat-label">STATUS</div>
             <div class="stat-val" style="font-size:12px" id="armStatusLabel">—</div>
@@ -4333,16 +4392,36 @@ svg.schem{width:100%;height:100%;display:block}
         if (grid && !grid.dataset.built){
           grid.dataset.built = '1';
           let html = '';
+          const metaMap = window.armMetaMap || {};
           for (const name of Object.keys(s.present_positions_deg)){
             const shortName = name.replace('joint_','J').toUpperCase().replace('GRIPPER','GRIP');
-            html += `<div style="display:grid;grid-template-columns:38px 50px 60px 22px 22px;gap:3px;align-items:center;font-size:10px;font-family:var(--font-mono)">
-              <span style="color:var(--text-dim);letter-spacing:.1em">${shortName}</span>
-              <span class="arm-joint-val" data-joint="${name}" style="color:var(--amber);text-align:right;font-family:var(--font-tech)">—</span>
-              <input class="arm-joint-input" data-joint-input="${name}" type="number" step="1" placeholder="deg"
-                style="width:100%;background:#1a1610;border:1px solid var(--line2);color:var(--cyan);font-family:var(--font-mono);font-size:10px;padding:2px 4px;text-align:right">
-              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="-2">−</button>
-              <button class="btn" style="padding:2px 0;font-size:11px;letter-spacing:0" data-joint-nudge="${name}" data-delta="2">+</button>
-            </div>`;
+            const meta = metaMap[name] || {};
+            const desc = meta.description || '';
+            const calibrated = meta.calibrated !== false;
+            const minD = meta.min_deg;
+            const maxD = meta.max_deg;
+            const limitTxt = (minD != null && maxD != null) ? `${minD}~${maxD}°` : '— ~ —';
+            const warnCls = calibrated ? '' : 'uncalibrated';
+            const minAttr = (minD != null) ? `min="${minD}"` : '';
+            const maxAttr = (maxD != null) ? `max="${maxD}"` : '';
+            const disabledAttr = calibrated ? '' : 'disabled';
+            const inpTitle = calibrated ? `范围 ${limitTxt}` : '⚠ 未校准 limit · 暂禁输入 · 用 nudge ±2° 试探确认范围后再开';
+            const descTitle = calibrated ? desc : desc + '  · ⚠ 未校准';
+            html += `
+              <div class="arm-joint-row ${warnCls}">
+                <div class="arm-joint-head">
+                  <span class="arm-joint-name">${shortName}</span>
+                  <span class="arm-joint-desc" title="${descTitle}">${desc || '—'}</span>
+                  <span class="arm-joint-limit">${limitTxt}${calibrated ? '' : ' ⚠'}</span>
+                </div>
+                <div class="arm-joint-ctrl">
+                  <span class="arm-joint-val" data-joint="${name}">—</span>
+                  <input class="arm-joint-input" data-joint-input="${name}" type="number" step="0.5" placeholder="deg"
+                    ${minAttr} ${maxAttr} ${disabledAttr} title="${inpTitle}">
+                  <button class="btn arm-nudge" data-joint-nudge="${name}" data-delta="-2" title="-2°">−</button>
+                  <button class="btn arm-nudge" data-joint-nudge="${name}" data-delta="2" title="+2°">+</button>
+                </div>
+              </div>`;
           }
           grid.innerHTML = html;
           grid.querySelectorAll('[data-joint-nudge]').forEach(b => {
@@ -4355,11 +4434,26 @@ svg.schem{width:100%;height:100%;display:block}
               } catch(e){}
             });
           });
-          // 绝对角度输入:Enter / blur 提交
+          // 绝对角度输入:Enter / blur 提交 + client-side limit check
           grid.querySelectorAll('[data-joint-input]').forEach(inp => {
+            const minD = inp.min !== '' ? parseFloat(inp.min) : null;
+            const maxD = inp.max !== '' ? parseFloat(inp.max) : null;
+            const checkLimit = (v) => {
+              if (minD != null && v < minD) return `≤ ${minD}°`;
+              if (maxD != null && v > maxD) return `≥ ${maxD}°`;
+              return null;
+            };
             const send = async () => {
               const v = parseFloat(inp.value);
               if (isNaN(v)) return;
+              const lim = checkLimit(v);
+              if (lim){
+                inp.style.borderColor = '#ff3a2e';
+                inp.style.background = 'rgba(255,58,46,0.15)';
+                inp.title = `⛔ 越界:${v}° ${lim} · 请在 ${minD}~${maxD}° 内`;
+                setTimeout(() => { inp.style.background = '#1a1610'; inp.style.borderColor = ''; }, 2000);
+                return;
+              }
               inp.style.borderColor = 'var(--amber)';
               try {
                 const r = await fetch('/api/arm/move_joint', {
@@ -4367,9 +4461,16 @@ svg.schem{width:100%;height:100%;display:block}
                   body: JSON.stringify({joint: inp.dataset.jointInput, target_deg: v}),
                 });
                 inp.style.borderColor = r.ok ? 'var(--green)' : '#ff3a2e';
+                if (!r.ok){ try{ const j = await r.json(); inp.title = j.detail || j.error || 'err'; }catch{} }
               } catch(e){ inp.style.borderColor = '#ff3a2e'; }
               setTimeout(() => { inp.style.borderColor = ''; }, 800);
             };
+            inp.addEventListener('input', () => {
+              const v = parseFloat(inp.value);
+              if (isNaN(v)) return;
+              const lim = checkLimit(v);
+              inp.style.color = lim ? '#ff7a6e' : 'var(--cyan)';
+            });
             inp.addEventListener('keydown', ev => { if (ev.key === 'Enter'){ ev.preventDefault(); send(); inp.blur(); }});
             inp.addEventListener('blur', () => { if (inp.value !== '') send(); });
             // 双击输入框 = 用当前角度填充
@@ -4389,7 +4490,16 @@ svg.schem{width:100%;height:100%;display:block}
       }
     } catch(e){}
   }
-  loadArmStatus(); setInterval(loadArmStatus, 3000);
+  async function loadArmMeta(){
+    try {
+      const r = await fetch('/api/arm/meta');
+      if (!r.ok) return;
+      const d = await r.json();
+      window.armMetaMap = {};
+      (d.joints || []).forEach(j => { window.armMetaMap[j.name] = j; });
+    } catch(e){}
+  }
+  loadArmMeta().then(() => { loadArmStatus(); setInterval(loadArmStatus, 3000); });
 
   // ARM torque toggle
   let armTorqueOn = false;
