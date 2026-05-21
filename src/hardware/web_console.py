@@ -74,7 +74,7 @@ arm_lock = threading.Lock()
 loop: asyncio.AbstractEventLoop | None = None
 
 YOLO_MODELS_DIR = "/home/pi/yolo_env"
-DEFAULT_YOLO_MODEL = "/home/pi/yolo_env/yolov8n.pt"
+DEFAULT_YOLO_MODEL = "/home/pi/yolo_env/yolo26n.pt"  # 2026-05 升级:RPi 5 上 latency 383→133ms (2.9×),FPS 3→6.9
 clients: set[WebSocket] = set()
 log_buf: deque = deque(maxlen=300)
 
