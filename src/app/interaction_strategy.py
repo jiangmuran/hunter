@@ -23,11 +23,20 @@ def build_interaction_strategy(summary: dict[str, Any]) -> dict[str, Any]:
             "目标曾经出现但中途丢失，继续追逐会增加风险。",
             "保守暂停，等待目标重新稳定出现。",
         )
-    if summary.get("reached_stop_distance") or engagement_score >= 70:
+    if summary.get("reached_stop_distance"):
+        confidence = "high" if engagement_score >= 70 else "medium"
+        reason = "已经安全靠近目标，互动质量较高。" if engagement_score >= 70 else "已经安全靠近目标，但还需要继续观察互动兴趣。"
+        return _strategy(
+            "continue_engagement",
+            confidence,
+            reason,
+            "保持低强度互动，并观察猫是否继续感兴趣。",
+        )
+    if engagement_score >= 70:
         return _strategy(
             "continue_engagement",
             "high",
-            "已经安全靠近目标，互动质量较高。",
+            "互动质量较高，可以继续当前玩法。",
             "保持低强度互动，并观察猫是否继续感兴趣。",
         )
     if summary.get("target_seen"):
