@@ -16,10 +16,14 @@ def aggregate_daily_sessions(artifacts: list[dict[str, Any]], target_date: str |
     )
     command_totals = Counter()
     highlights = []
+    story_highlights = []
     for artifact in daily_artifacts:
         summary = artifact.get("summary", {})
         command_totals.update(summary.get("command_counts", {}))
         highlights.extend(summary.get("highlights", []))
+        highlight = artifact.get("highlight")
+        if highlight and highlight.get("story"):
+            story_highlights.append(highlight["story"])
 
     return {
         "date": date,
@@ -27,6 +31,7 @@ def aggregate_daily_sessions(artifacts: list[dict[str, Any]], target_date: str |
         "outcome_counts": dict(outcome_counts),
         "command_totals": dict(command_totals),
         "highlights": highlights,
+        "story_highlights": story_highlights,
     }
 
 
@@ -38,6 +43,7 @@ def build_daily_diary_prompt(stats: dict[str, Any]) -> str:
         f"结果统计：{_format_counts(stats.get('outcome_counts', {}))}",
         f"动作统计：{_format_counts(stats.get('command_totals', {}))}",
         f"关键记录：{_format_highlights(stats.get('highlights', []))}",
+        f"故事素材：{_format_highlights(stats.get('story_highlights', []))}",
     ])
 
 
@@ -78,6 +84,9 @@ def _template_text(stats: dict[str, Any]) -> str:
     highlights = stats.get("highlights", [])
     if highlights:
         lines.append(f"印象最深的是：{_format_highlights(highlights)}。")
+    story_highlights = stats.get("story_highlights", [])
+    if story_highlights:
+        lines.append(f"可以写成故事的是：{_format_highlights(story_highlights)}。")
     return "\n".join(lines)
 
 

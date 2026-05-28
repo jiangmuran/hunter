@@ -114,6 +114,22 @@ class DailyDiaryTest(unittest.TestCase):
         self.assertEqual(diary["stats"]["total_sessions"], 1)
         self.assertIn("text", diary)
 
+    def test_daily_diary_prompt_includes_story_highlights(self):
+        from src.app.daily_diary import aggregate_daily_sessions, build_daily_diary_prompt
+
+        artifact = {
+            "ended_at": "2026-05-28T12:00:00Z",
+            "summary": {"command_counts": {"forward": 1}, "highlights": ["target acquired during session"]},
+            "report": {"outcome": "success"},
+            "highlight": {"story": "Hunter 安全靠近目标", "detail": "4 ticks"},
+        }
+
+        stats = aggregate_daily_sessions([artifact], target_date="2026-05-28")
+        prompt = build_daily_diary_prompt(stats)
+
+        self.assertIn("故事素材", prompt)
+        self.assertIn("Hunter 安全靠近目标", prompt)
+
 
 def _artifact(session_id, outcome, command_counts=None, highlights=None, ended_at="2026-05-16T10:00:00Z"):
     return {
