@@ -167,6 +167,27 @@ class DemoTest(unittest.TestCase):
         self.assertTrue(any(candidate["novelty"] < 1.0 for candidate in result["candidates"]))
         self.assertNotIn("html", result)
 
+    def test_prd_software_coverage_reports_real_use_gaps(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--prd-software-coverage"], verbose=False)
+
+        self.assertFalse(result["real_product_ready"])
+        self.assertIn("blockers", result)
+        self.assertTrue(any(blocker["id"] == "audio_emotion" for blocker in result["blockers"]))
+        self.assertNotIn("html", result)
+
+    def test_onsite_demo_check_reports_readiness_and_commands(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--onsite-demo-check"], verbose=False)
+
+        self.assertFalse(result["real_product_ready"])
+        self.assertIn("coverage", result)
+        self.assertIn("consistency_checks", result)
+        self.assertIn("python -m src.app.demo --software-mvp-acceptance", result["demo_commands"])
+        self.assertNotIn("html", result)
+
 
 if __name__ == "__main__":
     unittest.main()

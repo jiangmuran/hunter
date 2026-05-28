@@ -15,6 +15,7 @@ from src.app.mvp_milestone import build_mvp_milestone
 from src.app.next_session_plan import build_next_session_plan
 from src.app.orchestrator import AppOrchestrator
 from src.app.personalization_policy import build_personalization_preview
+from src.app.prd_readiness import build_onsite_demo_check, build_prd_software_coverage
 from src.app.session_artifact import build_session_artifact
 from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
@@ -105,6 +106,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--software-mvp-acceptance", action="store_true")
     parser.add_argument("--software-intelligence-brief", action="store_true")
     parser.add_argument("--surprise-entropy-preview", action="store_true")
+    parser.add_argument("--prd-software-coverage", action="store_true")
+    parser.add_argument("--onsite-demo-check", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -240,6 +243,10 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
         return run_software_intelligence_brief(verbose=verbose)
     if args.surprise_entropy_preview:
         return run_surprise_entropy_preview(verbose=verbose)
+    if args.prd_software_coverage:
+        return run_prd_software_coverage(verbose=verbose)
+    if args.onsite_demo_check:
+        return run_onsite_demo_check(verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -251,8 +258,24 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     return run_demo_session(argv, verbose=verbose)
 
 
-def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
+def run_prd_software_coverage(verbose: bool = True) -> dict[str, Any]:
+    coverage = build_prd_software_coverage()
+    if verbose:
+        print({"prd_software_coverage": coverage})
+    return coverage
+
+
+def run_onsite_demo_check(verbose: bool = True) -> dict[str, Any]:
     product_suite = run_product_demo_suite(verbose=False)
+    intelligence_brief = _build_software_intelligence_brief_from_suite(product_suite)
+    entropy_preview = _build_surprise_entropy_preview_from_suite(product_suite)
+    check = build_onsite_demo_check(product_suite, intelligence_brief, entropy_preview)
+    if verbose:
+        print({"onsite_demo_check": check})
+    return check
+
+
+def _build_software_intelligence_brief_from_suite(product_suite: dict[str, Any]) -> dict[str, Any]:
     artifacts = list(product_suite["artifacts"].values())
     preferences = product_suite["dashboard_preview"].get("memory_preferences", [])
     profile = build_cat_profile(artifacts, preferences)
@@ -268,7 +291,7 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
     representative_artifact = _representative_brief_artifact(artifacts)
     representative_report = representative_artifact.get("report", {}) if representative_artifact else {}
     enhanced_report = build_enhanced_report(representative_report, strategy, profile, next_plan)
-    brief = {
+    return {
         "capabilities": [
             "interaction_strategy",
             "cat_profile",
@@ -283,6 +306,25 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
         "enhanced_report": enhanced_report,
         "surprise_entropy": entropy,
     }
+
+
+def _build_surprise_entropy_preview_from_suite(product_suite: dict[str, Any]) -> dict[str, Any]:
+    artifacts = list(product_suite["artifacts"].values())
+    preferences = product_suite["dashboard_preview"].get("memory_preferences", [])
+    profile = build_cat_profile(artifacts, preferences)
+    strategy = build_suite_strategy(artifacts)
+    return build_surprise_entropy_preview(
+        profile,
+        strategy,
+        product_suite["personalization_preview"],
+        recent_outcomes=_recent_outcomes(artifacts),
+        recent_actions=_recent_actions(artifacts),
+    )
+
+
+def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=False)
+    brief = _build_software_intelligence_brief_from_suite(product_suite)
     if verbose:
         print({"software_intelligence_brief": brief})
     return brief
@@ -290,17 +332,7 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
 
 def run_surprise_entropy_preview(verbose: bool = True) -> dict[str, Any]:
     product_suite = run_product_demo_suite(verbose=False)
-    artifacts = list(product_suite["artifacts"].values())
-    preferences = product_suite["dashboard_preview"].get("memory_preferences", [])
-    profile = build_cat_profile(artifacts, preferences)
-    strategy = build_suite_strategy(artifacts)
-    entropy = build_surprise_entropy_preview(
-        profile,
-        strategy,
-        product_suite["personalization_preview"],
-        recent_outcomes=_recent_outcomes(artifacts),
-        recent_actions=_recent_actions(artifacts),
-    )
+    entropy = _build_surprise_entropy_preview_from_suite(product_suite)
     if verbose:
         print({"surprise_entropy_preview": entropy})
     return entropy
