@@ -85,6 +85,7 @@ def build_surprise_entropy_preview(
         "candidates": [{key: value for key, value in candidate.items() if key != "rank"} for candidate in candidates],
         "safety_gate": safety_gate,
         "recent_outcomes": outcomes,
+        "recent_actions": actions,
     }
 
 
@@ -130,7 +131,7 @@ def _score_candidate(
 ) -> dict[str, Any]:
     novelty = _novelty(candidate["name"], recent_actions)
     preference_match = 1.0 if candidate["arm"] == preferred_arm else 0.45
-    if candidate["name"] == "pause_observe":
+    if candidate["name"] == "pause_observe" and candidate["arm"] != preferred_arm:
         preference_match = 0.55
     engagement_fit = _engagement_fit(candidate["intensity"], engagement_level, strategy.get("decision", ""))
     risk_penalty = _risk_penalty(candidate["intensity"], profile, strategy)
@@ -213,10 +214,10 @@ def _candidate_reason(
         return "风险门控拦截该动作，当前不建议执行。"
     if candidate["name"] == "pause_observe":
         return "先暂停观察，降低对猫的压力并等待稳定信号。"
-    if preference_match >= 1.0 and novelty >= 0.65:
-        return "动作符合当前偏好，并且近期重复度低。"
     if risk_penalty > 0:
         return "动作有一定风险扣分，仅在状态稳定时使用。"
+    if preference_match >= 1.0 and novelty >= 0.65:
+        return "动作符合当前偏好，并且近期重复度低。"
     if novelty < 0.5:
         return "近期已经重复过该动作，新鲜感较低。"
     return "动作在参与度和新鲜感之间保持平衡。"

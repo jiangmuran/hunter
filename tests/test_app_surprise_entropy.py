@@ -56,6 +56,7 @@ class SurpriseEntropyTest(unittest.TestCase):
             strategy={"decision": "search_again"},
             personalization={},
             recent_outcomes=["success", "lost_target"],
+            recent_actions=["wand_slow_sweep"],
         )
 
         self.assertEqual(result["engine"], "surprise_entropy")
@@ -63,7 +64,29 @@ class SurpriseEntropyTest(unittest.TestCase):
         self.assertIn("candidates", result)
         self.assertIn("safety_gate", result)
         self.assertEqual(result["recent_outcomes"], ["success", "lost_target"])
+        self.assertEqual(result["recent_actions"], ["wand_slow_sweep"])
         self.assertEqual(len(result["candidates"]), 5)
+
+    def test_risk_reason_takes_priority_over_preference_match(self):
+        result = build_surprise_entropy_preview(
+            profile={"engagement_level": "medium", "preferred_arm": "wand_hover", "risk_flags": ["lost_target"]},
+            strategy={"decision": "continue_engagement"},
+            personalization={"recommended_arm": "wand_hover"},
+        )
+
+        wand_hover = _candidate(result, "wand_hover_tease")
+        self.assertGreater(wand_hover["risk_penalty"], 0)
+        self.assertIn("风险扣分", wand_hover["reason"])
+
+    def test_pause_observe_can_fully_match_none_preference(self):
+        result = build_surprise_entropy_preview(
+            profile={"engagement_level": "low", "preferred_arm": "none", "risk_flags": []},
+            strategy={"decision": "search_again"},
+            personalization={},
+        )
+
+        pause = _candidate(result, "pause_observe")
+        self.assertEqual(pause["preference_match"], 1.0)
 
 
 def _candidate(result, name):

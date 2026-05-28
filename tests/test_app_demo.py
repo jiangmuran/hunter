@@ -163,6 +163,8 @@ class DemoTest(unittest.TestCase):
         self.assertIn("selected_action", result)
         self.assertIn("candidates", result)
         self.assertIn("safety_gate", result)
+        self.assertIn("pause_observe", result["recent_actions"])
+        self.assertTrue(any(candidate["novelty"] < 1.0 for candidate in result["candidates"]))
         self.assertNotIn("html", result)
 
 

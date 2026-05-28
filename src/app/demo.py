@@ -262,7 +262,8 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
         profile,
         strategy,
         product_suite["personalization_preview"],
-        recent_outcomes=[artifact.get("report", {}).get("outcome", "") for artifact in artifacts],
+        recent_outcomes=_recent_outcomes(artifacts),
+        recent_actions=_recent_actions(artifacts),
     )
     representative_artifact = _representative_brief_artifact(artifacts)
     representative_report = representative_artifact.get("report", {}) if representative_artifact else {}
@@ -297,11 +298,30 @@ def run_surprise_entropy_preview(verbose: bool = True) -> dict[str, Any]:
         profile,
         strategy,
         product_suite["personalization_preview"],
-        recent_outcomes=[artifact.get("report", {}).get("outcome", "") for artifact in artifacts],
+        recent_outcomes=_recent_outcomes(artifacts),
+        recent_actions=_recent_actions(artifacts),
     )
     if verbose:
         print({"surprise_entropy_preview": entropy})
     return entropy
+
+
+def _recent_outcomes(artifacts: list[dict[str, Any]]) -> list[str]:
+    return [artifact.get("report", {}).get("outcome", "") for artifact in artifacts]
+
+
+def _recent_actions(artifacts: list[dict[str, Any]]) -> list[str]:
+    actions = []
+    for artifact in artifacts:
+        report = artifact.get("report", {}) if isinstance(artifact.get("report", {}), dict) else {}
+        outcome = report.get("outcome")
+        if outcome == "success":
+            actions.append("wand_slow_sweep")
+        elif outcome == "lost_target":
+            actions.append("laser_escape_short")
+        elif outcome in {"no_target", "error"}:
+            actions.append("pause_observe")
+    return actions
 
 
 def _representative_brief_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
