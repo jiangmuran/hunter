@@ -142,7 +142,9 @@ class DemoTest(unittest.TestCase):
         self.assertIn("strategy", result)
         self.assertIn("next_session_plan", result)
         self.assertIn("enhanced_report", result)
+        self.assertIn("surprise_entropy", result)
         self.assertIn("interaction_strategy", result["capabilities"])
+        self.assertIn("surprise_entropy_engine", result["capabilities"])
         self.assertNotIn("html", result)
 
     def test_software_intelligence_brief_uses_representative_success_report(self):
@@ -151,6 +153,17 @@ class DemoTest(unittest.TestCase):
         result = run_demo_entry(["--software-intelligence-brief"], verbose=False)
 
         self.assertIn("看到了猫，并安全靠近到制动距离", result["enhanced_report"]["text"])
+
+    def test_surprise_entropy_preview_returns_non_webui_engine_output(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--surprise-entropy-preview"], verbose=False)
+
+        self.assertEqual(result["engine"], "surprise_entropy")
+        self.assertIn("selected_action", result)
+        self.assertIn("candidates", result)
+        self.assertIn("safety_gate", result)
+        self.assertNotIn("html", result)
 
 
 if __name__ == "__main__":
