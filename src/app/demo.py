@@ -274,6 +274,7 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
     return brief
 
 
+def run_web_ui_preview_entry(output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
     from src.app.web_ui import run_web_ui_preview
 
     html = run_web_ui_preview(verbose=False)
