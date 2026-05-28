@@ -130,6 +130,33 @@ class DailyDiaryTest(unittest.TestCase):
         self.assertIn("故事素材", prompt)
         self.assertIn("Hunter 安全靠近目标", prompt)
 
+    def test_highlight_string_does_not_crash(self):
+        from src.app.daily_diary import aggregate_daily_sessions
+
+        artifact = _artifact("s1", "success", ended_at="2026-05-28T12:00:00Z")
+        artifact["highlight"] = "bad"
+
+        stats = aggregate_daily_sessions([artifact], target_date="2026-05-28")
+        self.assertEqual(stats["story_highlights"], [])
+
+    def test_highlight_list_does_not_crash(self):
+        from src.app.daily_diary import aggregate_daily_sessions
+
+        artifact = _artifact("s1", "success", ended_at="2026-05-28T12:00:00Z")
+        artifact["highlight"] = ["not", "a", "dict"]
+
+        stats = aggregate_daily_sessions([artifact], target_date="2026-05-28")
+        self.assertEqual(stats["story_highlights"], [])
+
+    def test_highlight_empty_dict_adds_nothing(self):
+        from src.app.daily_diary import aggregate_daily_sessions
+
+        artifact = _artifact("s1", "success", ended_at="2026-05-28T12:00:00Z")
+        artifact["highlight"] = {}
+
+        stats = aggregate_daily_sessions([artifact], target_date="2026-05-28")
+        self.assertEqual(stats["story_highlights"], [])
+
 
 def _artifact(session_id, outcome, command_counts=None, highlights=None, ended_at="2026-05-16T10:00:00Z"):
     return {

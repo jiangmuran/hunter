@@ -22,7 +22,7 @@ def aggregate_daily_sessions(artifacts: list[dict[str, Any]], target_date: str |
         command_totals.update(summary.get("command_counts", {}))
         highlights.extend(summary.get("highlights", []))
         highlight = artifact.get("highlight")
-        if highlight and highlight.get("story"):
+        if isinstance(highlight, dict) and highlight.get("story"):
             story_highlights.append(highlight["story"])
 
     return {
