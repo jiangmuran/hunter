@@ -132,6 +132,19 @@ class DemoTest(unittest.TestCase):
         self.assertIn("html", result)
         self.assertIn("Scenario Console", result["html"])
 
+    def test_software_intelligence_brief_returns_non_webui_agent_outputs(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--software-intelligence-brief"], verbose=False)
+
+        self.assertIn("capabilities", result)
+        self.assertIn("profile", result)
+        self.assertIn("strategy", result)
+        self.assertIn("next_session_plan", result)
+        self.assertIn("enhanced_report", result)
+        self.assertIn("interaction_strategy", result["capabilities"])
+        self.assertNotIn("html", result)
+
 
 if __name__ == "__main__":
     unittest.main()

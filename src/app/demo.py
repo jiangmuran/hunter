@@ -4,11 +4,15 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from src.app.cat_profile import build_cat_profile
 from src.app.config import AppConfig
 from src.app.daily_diary import build_daily_diary_from_sessions
 from src.app.dashboard_preview import build_dashboard_preview
+from src.app.enhanced_report import build_enhanced_report
+from src.app.interaction_strategy import build_suite_strategy
 from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
+from src.app.next_session_plan import build_next_session_plan
 from src.app.orchestrator import AppOrchestrator
 from src.app.personalization_policy import build_personalization_preview
 from src.app.session_artifact import build_session_artifact
@@ -98,6 +102,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--include-memory-update", action="store_true")
     parser.add_argument("--product-suite", action="store_true")
     parser.add_argument("--software-mvp-acceptance", action="store_true")
+    parser.add_argument("--software-intelligence-brief", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -229,6 +234,8 @@ def run_product_demo_suite(
 
 def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
+    if args.software_intelligence_brief:
+        return run_software_intelligence_brief(verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -240,7 +247,33 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     return run_demo_session(argv, verbose=verbose)
 
 
-def run_web_ui_preview_entry(output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
+def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=False)
+    artifacts = list(product_suite["artifacts"].values())
+    preferences = product_suite["dashboard_preview"].get("memory_preferences", [])
+    profile = build_cat_profile(artifacts, preferences)
+    strategy = build_suite_strategy(artifacts)
+    next_plan = build_next_session_plan(profile, strategy, product_suite["personalization_preview"])
+    latest_report = artifacts[-1].get("report", {}) if artifacts else {}
+    enhanced_report = build_enhanced_report(latest_report, strategy, profile, next_plan)
+    brief = {
+        "capabilities": [
+            "interaction_strategy",
+            "cat_profile",
+            "next_session_plan",
+            "enhanced_report",
+            "personalization_policy",
+        ],
+        "profile": profile,
+        "strategy": strategy,
+        "next_session_plan": next_plan,
+        "enhanced_report": enhanced_report,
+    }
+    if verbose:
+        print({"software_intelligence_brief": brief})
+    return brief
+
+
     from src.app.web_ui import run_web_ui_preview
 
     html = run_web_ui_preview(verbose=False)
