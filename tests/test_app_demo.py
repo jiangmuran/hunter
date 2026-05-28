@@ -167,6 +167,48 @@ class DemoTest(unittest.TestCase):
         self.assertTrue(any(candidate["novelty"] < 1.0 for candidate in result["candidates"]))
         self.assertNotIn("html", result)
 
+    def test_audio_emotion_preview_returns_non_webui_classifier_output(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--audio-emotion-preview"], verbose=False)
+
+        self.assertEqual(result["capability"], "audio_emotion_classifier")
+        self.assertIn("alert", result["labels"])
+        self.assertIn("classifications", result)
+        self.assertNotIn("html", result)
+
+    def test_treat_reward_preview_returns_non_webui_policy_output(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--treat-reward-preview"], verbose=False)
+
+        self.assertEqual(result["capability"], "treat_reward_policy")
+        self.assertIn("successful_catch", result["cases"])
+        self.assertIn("daily_limit_reached", result["cases"])
+        self.assertNotIn("html", result)
+
+    def test_prd_software_coverage_reports_real_use_gaps(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--prd-software-coverage"], verbose=False)
+
+        self.assertFalse(result["real_product_ready"])
+        self.assertEqual(result["blockers"], [])
+        self.assertTrue(result["software_demo_ready"])
+        self.assertNotIn("html", result)
+
+    def test_onsite_demo_check_reports_readiness_and_commands(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--onsite-demo-check"], verbose=False)
+
+        self.assertFalse(result["real_product_ready"])
+        self.assertTrue(result["software_abstraction_ready"])
+        self.assertIn("coverage", result)
+        self.assertIn("consistency_checks", result)
+        self.assertIn("python -m src.app.demo --software-mvp-acceptance", result["demo_commands"])
+        self.assertNotIn("html", result)
+
 
 if __name__ == "__main__":
     unittest.main()
