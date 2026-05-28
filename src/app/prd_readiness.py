@@ -162,10 +162,12 @@ def build_prd_software_coverage() -> dict[str, Any]:
 def build_onsite_demo_check(product_suite: dict[str, Any], intelligence_brief: dict[str, Any], entropy_preview: dict[str, Any]) -> dict[str, Any]:
     coverage = build_prd_software_coverage()
     consistency = _consistency_checks(product_suite, intelligence_brief, entropy_preview)
+    software_demo_ready = len([check for check in consistency if not check["passed"]]) == 0
     blockers = [*coverage["blockers"], *[check for check in consistency if not check["passed"]]]
     return {
-        "ready": len(blockers) == 0,
-        "software_demo_ready": len([check for check in consistency if not check["passed"]]) == 0,
+        "ready": coverage["real_product_ready"] and software_demo_ready,
+        "software_abstraction_ready": len(blockers) == 0,
+        "software_demo_ready": software_demo_ready,
         "real_product_ready": coverage["real_product_ready"],
         "coverage": coverage,
         "consistency_checks": consistency,

@@ -43,7 +43,8 @@ class PrdReadinessTest(unittest.TestCase):
             entropy_preview={"candidates": [{"novelty": 0.65}, {"novelty": 1.0}]},
         )
 
-        self.assertTrue(check["ready"])
+        self.assertFalse(check["ready"])
+        self.assertTrue(check["software_abstraction_ready"])
         self.assertTrue(check["software_demo_ready"])
         self.assertFalse(check["real_product_ready"])
         self.assertIn("python -m src.app.demo --software-intelligence-brief", check["demo_commands"])

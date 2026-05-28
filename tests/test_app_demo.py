@@ -203,6 +203,7 @@ class DemoTest(unittest.TestCase):
         result = run_demo_entry(["--onsite-demo-check"], verbose=False)
 
         self.assertFalse(result["real_product_ready"])
+        self.assertTrue(result["software_abstraction_ready"])
         self.assertIn("coverage", result)
         self.assertIn("consistency_checks", result)
         self.assertIn("python -m src.app.demo --software-mvp-acceptance", result["demo_commands"])

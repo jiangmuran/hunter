@@ -29,6 +29,17 @@ class AudioEmotionTest(unittest.TestCase):
         self.assertEqual(result["label"], "playful")
         self.assertEqual(result["display_label"], "玩耍")
 
+    def test_explicit_audio_label_and_confidence_are_normalized(self):
+        result = classify_audio_emotion({"label": "hungry", "confidence": 1.8})
+
+        self.assertEqual(result["label"], "hungry")
+        self.assertEqual(result["confidence"], 1.0)
+
+    def test_invalid_explicit_audio_label_uses_features(self):
+        result = classify_audio_emotion({"label": "unknown", "pitch_hz": 720, "energy": 0.9})
+
+        self.assertEqual(result["label"], "alert")
+
     def test_audio_emotion_preview_covers_prd_labels(self):
         result = build_audio_emotion_preview()
 

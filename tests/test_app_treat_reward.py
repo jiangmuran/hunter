@@ -51,6 +51,24 @@ class TreatRewardTest(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("target_lost", result["blocked_reasons"])
 
+    def test_unhealthy_session_blocks_reward_even_after_catch_success(self):
+        result = build_treat_reward_decision(
+            {"final_state": "at_stop_distance", "healthy": False},
+            {"daily_limit": 12, "dispensed_today": 0, "remaining_treats": 20},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("session_unhealthy", result["blocked_reasons"])
+
+    def test_error_session_blocks_reward_even_after_catch_success(self):
+        result = build_treat_reward_decision(
+            {"final_state": "at_stop_distance", "healthy": True, "error": True},
+            {"daily_limit": 12, "dispensed_today": 0, "remaining_treats": 20},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("session_unhealthy", result["blocked_reasons"])
+
     def test_treat_reward_preview_contains_required_cases(self):
         result = build_treat_reward_preview()
 
