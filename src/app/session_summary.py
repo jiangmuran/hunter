@@ -36,7 +36,7 @@ def _build_activity(states: list[dict[str, Any]]) -> dict[str, Any]:
             "engagement_score": 0,
         }
 
-    target_visible_ticks = sum(1 for s in states if s.get("target"))
+    target_visible_ticks = sum(1 for s in states if s.get("target") and "cx" in s["target"] and "cy" in s["target"])
     moving_actions = {"forward", "rotate_cw", "rotate_ccw"}
     moving_ticks = sum(1 for s in states if s.get("last_action") in moving_actions)
 

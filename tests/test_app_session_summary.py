@@ -95,8 +95,9 @@ class SessionSummaryTest(unittest.TestCase):
 
         self.assertEqual(summary["trajectory"]["points"], [(100, 200), (140, 220), (180, 260)])
         self.assertEqual(summary["trajectory"]["point_count"], 3)
-        self.assertGreater(summary["trajectory"]["path_length"], 100)
+        self.assertEqual(summary["trajectory"]["path_length"], 101.29)
         self.assertEqual(summary["activity"]["target_visible_ticks"], 3)
+        self.assertEqual(summary["activity"]["moving_ticks"], 2)
         self.assertEqual(summary["activity"]["engagement_score"], 100)
 
     def test_summarize_session_handles_missing_target_trajectory(self):
@@ -110,9 +111,28 @@ class SessionSummaryTest(unittest.TestCase):
         summary = summarize_session(states, [])
 
         self.assertEqual(summary["trajectory"]["points"], [])
+        self.assertEqual(summary["trajectory"]["point_count"], 0)
         self.assertEqual(summary["trajectory"]["path_length"], 0)
         self.assertEqual(summary["activity"]["target_visible_ticks"], 0)
+        self.assertEqual(summary["activity"]["moving_ticks"], 0)
         self.assertEqual(summary["activity"]["engagement_score"], 0)
+
+
+    def test_summarize_session_handles_partial_target_data(self):
+        from src.app.session_summary import summarize_session
+
+        states = [
+            {"state": "aligning", "target": {"cx": 100}, "healthy": True, "last_action": "rotate_cw"},
+            {"state": "approaching", "target": {"cx": 140, "cy": 220}, "healthy": True, "last_action": "forward"},
+            {"state": "scanning", "target": {"cy": 260}, "healthy": True, "last_action": "stop"},
+        ]
+
+        summary = summarize_session(states, [])
+
+        self.assertEqual(summary["trajectory"]["points"], [(140, 220)])
+        self.assertEqual(summary["trajectory"]["point_count"], 1)
+        self.assertEqual(summary["activity"]["target_visible_ticks"], 1)
+        self.assertEqual(summary["activity"]["engagement_score"], 33)
 
 
 if __name__ == "__main__":
