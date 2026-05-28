@@ -193,8 +193,8 @@ class DemoTest(unittest.TestCase):
         result = run_demo_entry(["--prd-software-coverage"], verbose=False)
 
         self.assertFalse(result["real_product_ready"])
-        self.assertIn("blockers", result)
-        self.assertTrue(any(blocker["id"] == "audio_emotion" for blocker in result["blockers"]))
+        self.assertEqual(result["blockers"], [])
+        self.assertTrue(result["software_demo_ready"])
         self.assertNotIn("html", result)
 
     def test_onsite_demo_check_reports_readiness_and_commands(self):

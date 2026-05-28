@@ -19,9 +19,12 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "audio_emotion",
         "feature": "叫声识别",
-        "status": "missing",
-        "real_use_gap": "尚未实现音频采集、MFCC/CNN 分类或情绪事件流；真实可用需要麦克风输入、模型和稳定阈值。",
-        "evidence": [],
+        "status": "mock_usable",
+        "real_use_gap": "已有软件抽象层和四分类 mock 特征管线；真实可用还需要麦克风输入、MFCC/CNN 模型替换和现场阈值校准。",
+        "evidence": [
+            "src/app/audio_emotion.py",
+            "tests/test_app_audio_emotion.py",
+        ],
     },
     {
         "id": "activity_sensing",
@@ -59,9 +62,12 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "treat_reward",
         "feature": "零食投喂奖励",
-        "status": "missing",
-        "real_use_gap": "尚未实现扑抓成功判定、每日投喂上限、余量检测或 dispense_treat 软件策略。",
-        "evidence": [],
+        "status": "mock_usable",
+        "real_use_gap": "已有扑抓成功、每日上限、余量和投喂动作的软件策略；真实可用还需要接入零食机构、重量/余量传感器和落点标定。",
+        "evidence": [
+            "src/app/treat_reward.py",
+            "tests/test_app_treat_reward.py",
+        ],
     },
     {
         "id": "water_monitoring",
@@ -149,7 +155,7 @@ def build_prd_software_coverage() -> dict[str, Any]:
         "blockers": blockers,
         "software_demo_ready": len(blockers) == 0,
         "real_product_ready": False,
-        "real_product_summary": "软件 demo 层已覆盖多数可展示能力，但真实可用产品仍缺音频情绪、零食闭环，以及多项硬件/传感器端到端验证。",
+        "real_product_summary": "软件抽象层已按 PRD 覆盖；真实可用产品仍需要硬件、传感器、模型和现场长时间验证。",
     }
 
 
@@ -168,6 +174,8 @@ def build_onsite_demo_check(product_suite: dict[str, Any], intelligence_brief: d
             "python -m src.app.demo --software-mvp-acceptance",
             "python -m src.app.demo --software-intelligence-brief",
             "python -m src.app.demo --surprise-entropy-preview",
+            "python -m src.app.demo --audio-emotion-preview",
+            "python -m src.app.demo --treat-reward-preview",
             "python -m src.app.demo --product-suite",
             "python -m src.app.demo --mode mock --scenario all --include-memory-update",
         ],

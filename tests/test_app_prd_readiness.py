@@ -8,10 +8,14 @@ class PrdReadinessTest(unittest.TestCase):
         coverage = build_prd_software_coverage()
 
         self.assertFalse(coverage["real_product_ready"])
-        self.assertIn("missing", coverage["counts"])
-        blocker_ids = [blocker["id"] for blocker in coverage["blockers"]]
-        self.assertIn("audio_emotion", blocker_ids)
-        self.assertIn("treat_reward", blocker_ids)
+        self.assertEqual(coverage["blockers"], [])
+        self.assertTrue(coverage["software_demo_ready"])
+        audio = _feature(coverage, "audio_emotion")
+        treat = _feature(coverage, "treat_reward")
+        self.assertEqual(audio["status"], "mock_usable")
+        self.assertEqual(treat["status"], "mock_usable")
+        self.assertIn("src/app/audio_emotion.py", audio["evidence"])
+        self.assertIn("src/app/treat_reward.py", treat["evidence"])
 
     def test_prd_coverage_marks_remote_app_out_of_scope(self):
         coverage = build_prd_software_coverage()
@@ -39,10 +43,12 @@ class PrdReadinessTest(unittest.TestCase):
             entropy_preview={"candidates": [{"novelty": 0.65}, {"novelty": 1.0}]},
         )
 
-        self.assertFalse(check["ready"])
+        self.assertTrue(check["ready"])
         self.assertTrue(check["software_demo_ready"])
         self.assertFalse(check["real_product_ready"])
         self.assertIn("python -m src.app.demo --software-intelligence-brief", check["demo_commands"])
+        self.assertIn("python -m src.app.demo --audio-emotion-preview", check["demo_commands"])
+        self.assertIn("python -m src.app.demo --treat-reward-preview", check["demo_commands"])
         self.assertIn("真实可用产品", check["real_use_gap_summary"])
 
     def test_onsite_check_flags_consistency_failures(self):
