@@ -82,6 +82,38 @@ class SessionSummaryTest(unittest.TestCase):
         self.assertIn("target was lost after acquisition", summary["highlights"])
         self.assertIn("session ended in error", summary["highlights"])
 
+    def test_summarize_session_includes_trajectory_metrics(self):
+        from src.app.session_summary import summarize_session
+
+        states = [
+            {"state": "aligning", "target": {"cx": 100, "cy": 200}, "healthy": True, "last_action": "rotate_cw"},
+            {"state": "approaching", "target": {"cx": 140, "cy": 220}, "healthy": True, "last_action": "forward"},
+            {"state": "at_stop_distance", "target": {"cx": 180, "cy": 260}, "healthy": True, "last_action": "stop"},
+        ]
+
+        summary = summarize_session(states, [])
+
+        self.assertEqual(summary["trajectory"]["points"], [(100, 200), (140, 220), (180, 260)])
+        self.assertEqual(summary["trajectory"]["point_count"], 3)
+        self.assertGreater(summary["trajectory"]["path_length"], 100)
+        self.assertEqual(summary["activity"]["target_visible_ticks"], 3)
+        self.assertEqual(summary["activity"]["engagement_score"], 100)
+
+    def test_summarize_session_handles_missing_target_trajectory(self):
+        from src.app.session_summary import summarize_session
+
+        states = [
+            {"state": "scanning", "target": None, "healthy": True, "last_action": "stop"},
+            {"state": "scanning", "target": None, "healthy": True, "last_action": "stop"},
+        ]
+
+        summary = summarize_session(states, [])
+
+        self.assertEqual(summary["trajectory"]["points"], [])
+        self.assertEqual(summary["trajectory"]["path_length"], 0)
+        self.assertEqual(summary["activity"]["target_visible_ticks"], 0)
+        self.assertEqual(summary["activity"]["engagement_score"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
