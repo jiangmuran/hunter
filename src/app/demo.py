@@ -99,6 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--product-suite", action="store_true")
     parser.add_argument("--software-mvp-acceptance", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
+    parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
     return parser.parse_args(argv)
 
@@ -228,7 +229,7 @@ def run_product_demo_suite(
 
 def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
-    if args.web_ui_preview:
+    if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
         return run_product_demo_suite(verbose=verbose)

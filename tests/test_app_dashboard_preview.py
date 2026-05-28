@@ -49,6 +49,35 @@ class DashboardPreviewTest(unittest.TestCase):
 
         self.assertEqual(preview["memory_preferences"], preferences)
 
+    def test_dashboard_preview_includes_timeline_activity_and_highlights(self):
+        from src.app.dashboard_preview import build_dashboard_preview
+
+        artifacts = [
+            {
+                "id": "one",
+                "scenario": "approach",
+                "ended_at": "2026-05-28T10:00:00Z",
+                "states": [{"state": "scanning"}, {"state": "approaching"}],
+                "summary": {"command_counts": {"forward": 1}, "activity": {"engagement_score": 50}, "trajectory": {"point_count": 2, "path_length": 50}},
+                "report": {"outcome": "success", "title": "ok"},
+            },
+            {
+                "id": "two",
+                "scenario": "empty",
+                "ended_at": "2026-05-28T09:00:00Z",
+                "states": [{"state": "scanning"}],
+                "summary": {"command_counts": {"stop": 1}, "activity": {"engagement_score": 0}, "trajectory": {"point_count": 0, "path_length": 0}},
+                "report": {"outcome": "no_target", "title": "empty"},
+            },
+        ]
+
+        preview = build_dashboard_preview(artifacts)
+
+        self.assertEqual(preview["activity"]["average_engagement_score"], 25)
+        self.assertEqual(preview["trajectory"]["total_path_length"], 50)
+        self.assertEqual(preview["state_timeline"], ["scanning", "approaching", "scanning"])
+        self.assertEqual(len(preview["highlights"]), 2)
+
 
 def _artifact(session_id, outcome, command_counts, title=None, ended_at="2026-05-16T10:00:00Z"):
     return {
