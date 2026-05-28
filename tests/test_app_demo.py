@@ -167,6 +167,16 @@ class DemoTest(unittest.TestCase):
         self.assertTrue(any(candidate["novelty"] < 1.0 for candidate in result["candidates"]))
         self.assertNotIn("html", result)
 
+    def test_audio_emotion_preview_returns_non_webui_classifier_output(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--audio-emotion-preview"], verbose=False)
+
+        self.assertEqual(result["capability"], "audio_emotion_classifier")
+        self.assertIn("alert", result["labels"])
+        self.assertIn("classifications", result)
+        self.assertNotIn("html", result)
+
     def test_prd_software_coverage_reports_real_use_gaps(self):
         from src.app.demo import run_demo_entry
 

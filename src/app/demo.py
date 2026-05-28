@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from src.app.audio_emotion import build_audio_emotion_preview
 from src.app.cat_profile import build_cat_profile
 from src.app.config import AppConfig
 from src.app.daily_diary import build_daily_diary_from_sessions
@@ -108,6 +109,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--surprise-entropy-preview", action="store_true")
     parser.add_argument("--prd-software-coverage", action="store_true")
     parser.add_argument("--onsite-demo-check", action="store_true")
+    parser.add_argument("--audio-emotion-preview", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -247,6 +249,8 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
         return run_prd_software_coverage(verbose=verbose)
     if args.onsite_demo_check:
         return run_onsite_demo_check(verbose=verbose)
+    if args.audio_emotion_preview:
+        return run_audio_emotion_preview(verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -256,6 +260,13 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     if args.mode == "mock" and args.scenario == "all":
         return run_demo_suite(verbose=verbose, include_memory_update=args.include_memory_update)
     return run_demo_session(argv, verbose=verbose)
+
+
+def run_audio_emotion_preview(verbose: bool = True) -> dict[str, Any]:
+    preview = build_audio_emotion_preview()
+    if verbose:
+        print({"audio_emotion_preview": preview})
+    return preview
 
 
 def run_prd_software_coverage(verbose: bool = True) -> dict[str, Any]:
