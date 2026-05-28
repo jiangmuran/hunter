@@ -11,13 +11,17 @@ def build_session_highlights(artifacts: list[dict[str, Any]]) -> list[dict[str, 
 def _build_card(artifact: dict[str, Any]) -> dict[str, Any]:
     summary = artifact.get("summary", {})
     report = artifact.get("report", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(report, dict):
+        report = {}
     outcome = report.get("outcome", "unknown")
 
     return {
         "scenario": artifact.get("scenario", ""),
         "outcome": outcome,
         "tone": _tone(outcome),
-        "title": report.get("title", ""),
+        "title": report.get("title", "未命名互动"),
         "story": _story(outcome),
         "detail": _detail(summary),
     }
