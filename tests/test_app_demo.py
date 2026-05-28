@@ -177,6 +177,16 @@ class DemoTest(unittest.TestCase):
         self.assertIn("classifications", result)
         self.assertNotIn("html", result)
 
+    def test_treat_reward_preview_returns_non_webui_policy_output(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--treat-reward-preview"], verbose=False)
+
+        self.assertEqual(result["capability"], "treat_reward_policy")
+        self.assertIn("successful_catch", result["cases"])
+        self.assertIn("daily_limit_reached", result["cases"])
+        self.assertNotIn("html", result)
+
     def test_prd_software_coverage_reports_real_use_gaps(self):
         from src.app.demo import run_demo_entry
 

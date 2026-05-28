@@ -22,6 +22,7 @@ from src.app.session_memory import apply_session_memory_update, memory_preferenc
 from src.app.session_report import build_session_report
 from src.app.session_summary import summarize_session
 from src.app.surprise_entropy import build_surprise_entropy_preview
+from src.app.treat_reward import build_treat_reward_preview
 from src.software.perception.tracker import CatTracker
 
 
@@ -110,6 +111,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prd-software-coverage", action="store_true")
     parser.add_argument("--onsite-demo-check", action="store_true")
     parser.add_argument("--audio-emotion-preview", action="store_true")
+    parser.add_argument("--treat-reward-preview", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -251,6 +253,8 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
         return run_onsite_demo_check(verbose=verbose)
     if args.audio_emotion_preview:
         return run_audio_emotion_preview(verbose=verbose)
+    if args.treat_reward_preview:
+        return run_treat_reward_preview(verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -266,6 +270,13 @@ def run_audio_emotion_preview(verbose: bool = True) -> dict[str, Any]:
     preview = build_audio_emotion_preview()
     if verbose:
         print({"audio_emotion_preview": preview})
+    return preview
+
+
+def run_treat_reward_preview(verbose: bool = True) -> dict[str, Any]:
+    preview = build_treat_reward_preview()
+    if verbose:
+        print({"treat_reward_preview": preview})
     return preview
 
 
