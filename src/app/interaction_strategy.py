@@ -1,99 +1,74 @@
-"""Interaction strategy module for making session-level decisions.
-
-Provides two entry points:
-- build_interaction_strategy: decides next action from a single session summary.
-- build_suite_strategy: decides recovery/continuation across a series of session artifacts.
-"""
-
 from __future__ import annotations
 
 from typing import Any
 
 
+POOR_OUTCOMES = {"lost_target", "error", "no_target"}
+
+
 def build_interaction_strategy(summary: dict[str, Any]) -> dict[str, Any]:
-    """Return a strategic decision based on a single session summary.
-
-    Decisions: continue_engagement, search_again, safe_pause, recovery_check.
-    """
-    # Error or unhealthy system -> safe_pause
-    if summary.get("error") or not summary.get("healthy", True):
-        return {
-            "decision": "safe_pause",
-            "confidence": "high",
-            "reason": "系统出现异常，进入安全暂停状态",
-            "next_action": "触发安全暂停，等待人工介入",
-        }
-
-    # Success: reached stop distance with good engagement -> continue
-    if summary.get("reached_stop_distance"):
-        activity = summary.get("activity", {})
-        if activity.get("engagement_score", 0) >= 50:
-            return {
-                "decision": "continue_engagement",
-                "confidence": "high",
-                "reason": "已安全靠近目标，保持互动",
-                "next_action": "维持当前互动距离，继续采集数据",
-            }
-
-    # Lost target -> safe_pause
+    activity = summary.get("activity", {}) if isinstance(summary.get("activity", {}), dict) else {}
+    engagement_score = activity.get("engagement_score", 0)
+    if summary.get("error") or summary.get("final_state") == "error" or not summary.get("healthy", True):
+        return _strategy(
+            "safe_pause",
+            "high",
+            "本次互动出现异常，Hunter 应先保证安全。",
+            "保守暂停，检查感知和动作链路后再继续。",
+        )
     if summary.get("lost_target"):
-        return {
-            "decision": "safe_pause",
-            "confidence": "medium",
-            "reason": "目标丢失，需要重新定位",
-            "next_action": "保守暂停，等待重新搜索指令",
-        }
-
-    # No target seen -> search_again
-    if not summary.get("target_seen", True):
-        return {
-            "decision": "search_again",
-            "confidence": "medium",
-            "reason": "未发现目标",
-            "next_action": "执行重新搜索，扩大扫描范围",
-        }
-
-    # Default fallback
-    return {
-        "decision": "search_again",
-        "confidence": "low",
-        "reason": "默认行为：未满足其他条件，重新搜索",
-        "next_action": "重新搜索",
-    }
+        return _strategy(
+            "safe_pause",
+            "high",
+            "目标曾经出现但中途丢失，继续追逐会增加风险。",
+            "保守暂停，等待目标重新稳定出现。",
+        )
+    if summary.get("reached_stop_distance") or engagement_score >= 70:
+        return _strategy(
+            "continue_engagement",
+            "high",
+            "已经安全靠近目标，互动质量较高。",
+            "保持低强度互动，并观察猫是否继续感兴趣。",
+        )
+    if summary.get("target_seen"):
+        return _strategy(
+            "continue_engagement",
+            "medium",
+            "已经看到目标，但互动还没有形成稳定闭环。",
+            "降低速度继续观察，确认目标稳定后再靠近。",
+        )
+    return _strategy(
+        "search_again",
+        "medium",
+        "本次没有看到稳定目标，当前更适合继续搜索。",
+        "重新搜索目标，并保持待机安全距离。",
+    )
 
 
 def build_suite_strategy(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-    """Analyze a series of session artifacts and decide on a recovery strategy.
-
-    Repeated poor outcomes (lost_target, error, no_target) trigger recovery_check.
-    """
-    # Count outcomes from reports
-    bad_outcomes = 0
+    outcomes = []
     for artifact in artifacts:
-        report = artifact.get("report", {})
-        outcome = report.get("outcome", "")
-        if outcome in ("lost_target", "error", "no_target"):
-            bad_outcomes += 1
+        report = artifact.get("report", {}) if isinstance(artifact.get("report", {}), dict) else {}
+        outcome = report.get("outcome")
+        if outcome:
+            outcomes.append(outcome)
+    if len(outcomes) >= 3 and all(outcome in POOR_OUTCOMES for outcome in outcomes[-3:]):
+        return _strategy(
+            "recovery_check",
+            "high",
+            "最近连续出现低质量结果，需要先恢复稳定性。",
+            "先运行保守场景，确认感知稳定后再提高互动强度。",
+        )
+    latest_summary = artifacts[-1].get("summary", {}) if artifacts else {}
+    if not isinstance(latest_summary, dict):
+        latest_summary = {}
+    return build_interaction_strategy(latest_summary)
 
-    if bad_outcomes >= len(artifacts):
-        return {
-            "decision": "recovery_check",
-            "confidence": "high",
-            "reason": "连续多次不良结果，触发系统恢复检查",
-            "next_action": "全面系统诊断，重置搜索策略",
-        }
 
-    if bad_outcomes >= 2:
-        return {
-            "decision": "recovery_check",
-            "confidence": "medium",
-            "reason": "多次不良结果，建议系统恢复检查",
-            "next_action": "检查系统状态，调整搜索参数",
-        }
-
+def _strategy(decision: str, confidence: str, reason: str, next_action: str) -> dict[str, Any]:
     return {
-        "decision": "continue_engagement",
-        "confidence": "medium",
-        "reason": "整体表现正常，继续当前策略",
-        "next_action": "保持当前搜索和互动模式",
+        "decision": decision,
+        "confidence": confidence,
+        "reason": reason,
+        "next_action": next_action,
     }
