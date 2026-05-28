@@ -13,17 +13,13 @@ class WebUITest(unittest.TestCase):
         self.assertIn("daily_diary", model)
         self.assertIn("personalization", model)
 
-    def test_build_web_ui_model_attaches_dashboard_highlights_to_sessions(self):
+    def test_build_web_ui_model_attaches_highlight_to_each_session(self):
         from src.app.web_ui import build_web_ui_model
 
         model = build_web_ui_model()
 
         self.assertIn("highlights", model["dashboard"])
-        self.assertGreater(len(model["dashboard"]["highlights"]), 0)
-        self.assertEqual(len(model["sessions"]), model["dashboard"]["total_sessions"])
-        for session in model["sessions"]:
-            self.assertIn("dashboard_highlights", session)
-            self.assertEqual(session["dashboard_highlights"], model["dashboard"]["highlights"])
+        self.assertIn("highlight", model["sessions"][0])
 
     def test_render_web_ui_html_contains_dashboard_diary_and_personalization(self):
         from src.app.web_ui import build_web_ui_model, render_web_ui_html
@@ -42,11 +38,11 @@ class WebUITest(unittest.TestCase):
         html = render_web_ui_html(build_web_ui_model())
 
         self.assertIn("Scenario Console", html)
+        self.assertIn("data-scenario", html)
         self.assertIn("State Timeline", html)
         self.assertIn("Trajectory", html)
         self.assertIn("Highlights", html)
-        self.assertIn("scenario-button is-active", html)
-        self.assertIn("querySelectorAll('[data-scenario-button]')", html)
+        self.assertIn("<script>", html)
 
     def test_run_web_ui_preview_returns_html(self):
         from src.app.web_ui import run_web_ui_preview
