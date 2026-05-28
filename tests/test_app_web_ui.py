@@ -21,6 +21,53 @@ class WebUITest(unittest.TestCase):
         self.assertIn("highlights", model["dashboard"])
         self.assertIn("highlight", model["sessions"][0])
 
+    def test_render_web_ui_html_escapes_dynamic_content(self):
+        from src.app.web_ui import render_web_ui_html
+
+        model = {
+            "title": "Hunter <script>alert(1)</script>",
+            "subtitle": "mock <b>suite</b>",
+            "dashboard": {
+                "total_sessions": 1,
+                "outcome_counts": {"<bad>": 1},
+                "command_totals": {"stop": 1},
+                "state_timeline": ["<state>"],
+                "trajectory": {"total_path_length": "<10>"},
+                "activity": {"average_engagement_score": "<90>"},
+                "highlights": [{"tone": "success", "title": "<title>", "story": "<story>", "detail": "<detail>"}],
+            },
+            "daily_diary": {"text": "<diary>", "mode": "template"},
+            "personalization": {"recommended_arm": "<arm>", "summary": "<summary>", "source": "default"},
+            "acceptance": {"ready_for_hardware_integration": True, "remaining_for_real_mvp": ["<remaining>"]},
+            "sessions": [{"scenario": "<scenario>", "report": {"outcome": "<outcome>", "title": "<report>"}}],
+        }
+
+        html = render_web_ui_html(model)
+
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertIn("&lt;scenario&gt;", html)
+        self.assertIn("&lt;story&gt;", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
+
+    def test_render_web_ui_html_handles_empty_console_data(self):
+        from src.app.web_ui import render_web_ui_html
+
+        model = {
+            "title": "Hunter",
+            "subtitle": "empty",
+            "dashboard": {"total_sessions": 0, "outcome_counts": {}, "command_totals": {}, "state_timeline": [], "trajectory": {}, "activity": {}, "highlights": []},
+            "daily_diary": {"text": "none", "mode": "template"},
+            "personalization": {"recommended_arm": "wand_slow", "summary": "none", "source": "default"},
+            "acceptance": {"ready_for_hardware_integration": False, "remaining_for_real_mvp": []},
+            "sessions": [],
+        }
+
+        html = render_web_ui_html(model)
+
+        self.assertIn("Scenario Console", html)
+        self.assertIn("State Timeline", html)
+        self.assertIn("total path length", html)
+
     def test_render_web_ui_html_contains_dashboard_diary_and_personalization(self):
         from src.app.web_ui import build_web_ui_model, render_web_ui_html
 

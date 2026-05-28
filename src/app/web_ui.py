@@ -10,7 +10,7 @@ def build_web_ui_model() -> dict[str, Any]:
     product_suite = run_product_demo_suite(verbose=False)
     acceptance = run_software_mvp_acceptance(verbose=False)
     dashboard = product_suite["dashboard_preview"]
-    sessions = list(product_suite["artifacts"].values())
+    sessions = [dict(artifact) for artifact in product_suite["artifacts"].values()]
     highlights = dashboard.get("highlights", [])
     for session, highlight in zip(sessions, highlights):
         session["highlight"] = highlight
