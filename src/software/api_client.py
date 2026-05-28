@@ -73,6 +73,48 @@ class HunterAPI:
         resp.raise_for_status()
         return resp.json()
 
+    def capture_audio_features(self):
+        resp = self.session.get(f"{self.base}/api/audio/features", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+
+    def activity_sample(self):
+        resp = self.session.get(f"{self.base}/api/activity/sample", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+
+    def execute_play_action(self, action: str, intensity: str = "medium", duration_ms: int = 1200):
+        resp = self.session.post(
+            f"{self.base}/api/play/action",
+            json={"action": action, "intensity": intensity, "duration_ms": duration_ms},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def dispense_treat(self, grams: float = 1.0, reason: str = "reward"):
+        resp = self.session.post(
+            f"{self.base}/api/reward/treat",
+            json={"grams": grams, "reason": reason},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def water_state(self):
+        resp = self.session.get(f"{self.base}/api/water/state", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+
+    def remote_command(self, command: str, **params):
+        resp = self.session.post(
+            f"{self.base}/api/remote/command",
+            json={"command": command, **params},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ── 状态 ─────────────────────────────────────────────
     def state(self) -> dict:
         resp = self.session.get(f"{self.base}/api/state", timeout=5)
