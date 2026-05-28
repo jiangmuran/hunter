@@ -19,6 +19,7 @@ from src.app.session_artifact import build_session_artifact
 from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
 from src.app.session_summary import summarize_session
+from src.app.surprise_entropy import build_surprise_entropy_preview
 from src.software.perception.tracker import CatTracker
 
 
@@ -103,6 +104,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--product-suite", action="store_true")
     parser.add_argument("--software-mvp-acceptance", action="store_true")
     parser.add_argument("--software-intelligence-brief", action="store_true")
+    parser.add_argument("--surprise-entropy-preview", action="store_true")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -236,6 +238,8 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
     args = parse_args(argv)
     if args.software_intelligence_brief:
         return run_software_intelligence_brief(verbose=verbose)
+    if args.surprise_entropy_preview:
+        return run_surprise_entropy_preview(verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -254,6 +258,13 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
     profile = build_cat_profile(artifacts, preferences)
     strategy = build_suite_strategy(artifacts)
     next_plan = build_next_session_plan(profile, strategy, product_suite["personalization_preview"])
+    entropy = build_surprise_entropy_preview(
+        profile,
+        strategy,
+        product_suite["personalization_preview"],
+        recent_outcomes=_recent_outcomes(artifacts),
+        recent_actions=_recent_actions(artifacts),
+    )
     representative_artifact = _representative_brief_artifact(artifacts)
     representative_report = representative_artifact.get("report", {}) if representative_artifact else {}
     enhanced_report = build_enhanced_report(representative_report, strategy, profile, next_plan)
@@ -264,15 +275,53 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
             "next_session_plan",
             "enhanced_report",
             "personalization_policy",
+            "surprise_entropy_engine",
         ],
         "profile": profile,
         "strategy": strategy,
         "next_session_plan": next_plan,
         "enhanced_report": enhanced_report,
+        "surprise_entropy": entropy,
     }
     if verbose:
         print({"software_intelligence_brief": brief})
     return brief
+
+
+def run_surprise_entropy_preview(verbose: bool = True) -> dict[str, Any]:
+    product_suite = run_product_demo_suite(verbose=False)
+    artifacts = list(product_suite["artifacts"].values())
+    preferences = product_suite["dashboard_preview"].get("memory_preferences", [])
+    profile = build_cat_profile(artifacts, preferences)
+    strategy = build_suite_strategy(artifacts)
+    entropy = build_surprise_entropy_preview(
+        profile,
+        strategy,
+        product_suite["personalization_preview"],
+        recent_outcomes=_recent_outcomes(artifacts),
+        recent_actions=_recent_actions(artifacts),
+    )
+    if verbose:
+        print({"surprise_entropy_preview": entropy})
+    return entropy
+
+
+def _recent_outcomes(artifacts: list[dict[str, Any]]) -> list[str]:
+    return [artifact.get("report", {}).get("outcome", "") for artifact in artifacts]
+
+
+def _recent_actions(artifacts: list[dict[str, Any]]) -> list[str]:
+    actions = []
+    for artifact in artifacts:
+        report = artifact.get("report", {}) if isinstance(artifact.get("report", {}), dict) else {}
+        outcome = report.get("outcome")
+        if outcome == "success":
+            actions.append("wand_slow_sweep")
+        elif outcome == "lost_target":
+            actions.append("laser_escape_short")
+        elif outcome in {"no_target", "error"}:
+            actions.append("pause_observe")
+    return actions
 
 
 def _representative_brief_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
