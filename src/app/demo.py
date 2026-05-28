@@ -10,6 +10,7 @@ from src.app.config import AppConfig
 from src.app.daily_diary import build_daily_diary_from_sessions
 from src.app.dashboard_preview import build_dashboard_preview
 from src.app.enhanced_report import build_enhanced_report
+from src.app.hardware_plug_runtime import HardwarePlugRuntime
 from src.app.interaction_strategy import build_suite_strategy
 from src.app.mock_api import MockHunterAPI
 from src.app.mvp_milestone import build_mvp_milestone
@@ -17,6 +18,7 @@ from src.app.next_session_plan import build_next_session_plan
 from src.app.orchestrator import AppOrchestrator
 from src.app.personalization_policy import build_personalization_preview
 from src.app.prd_readiness import build_onsite_demo_check, build_prd_software_coverage
+from src.app.remote_takeover import RemoteTakeover
 from src.app.session_artifact import build_session_artifact
 from src.app.session_memory import apply_session_memory_update, memory_preferences, session_memory_update
 from src.app.session_report import build_session_report
@@ -112,6 +114,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--onsite-demo-check", action="store_true")
     parser.add_argument("--audio-emotion-preview", action="store_true")
     parser.add_argument("--treat-reward-preview", action="store_true")
+    parser.add_argument("--hardware-plug-check", action="store_true")
+    parser.add_argument("--remote-takeover-command")
+    parser.add_argument("--remote-token", default="")
+    parser.add_argument("--remote-operator-token", default="demo")
     parser.add_argument("--web-ui-preview", action="store_true")
     parser.add_argument("--web-ui-interactive", action="store_true")
     parser.add_argument("--web-ui-output")
@@ -255,6 +261,10 @@ def run_demo_entry(argv: list[str] | None = None, verbose: bool = True) -> dict:
         return run_audio_emotion_preview(verbose=verbose)
     if args.treat_reward_preview:
         return run_treat_reward_preview(verbose=verbose)
+    if args.hardware_plug_check:
+        return run_hardware_plug_check(verbose=verbose)
+    if args.remote_takeover_command:
+        return run_remote_takeover_command(args, verbose=verbose)
     if args.web_ui_preview or args.web_ui_interactive:
         return run_web_ui_preview_entry(args.web_ui_output, verbose=verbose)
     if args.product_suite:
@@ -278,6 +288,24 @@ def run_treat_reward_preview(verbose: bool = True) -> dict[str, Any]:
     if verbose:
         print({"treat_reward_preview": preview})
     return preview
+
+
+def run_hardware_plug_check(verbose: bool = True) -> dict[str, Any]:
+    result = HardwarePlugRuntime(MockHunterAPI()).tick(play_action="wand_fast")
+    if verbose:
+        print({"hardware_plug_check": result})
+    return result
+
+
+def run_remote_takeover_command(args: argparse.Namespace, verbose: bool = True) -> dict[str, Any]:
+    api = build_api(mode=args.mode, base_url=args.base_url)
+    result = RemoteTakeover(api, operator_token=args.remote_operator_token).dispatch(
+        args.remote_takeover_command,
+        token=args.remote_token,
+    )
+    if verbose:
+        print({"remote_takeover": result})
+    return result
 
 
 def run_prd_software_coverage(verbose: bool = True) -> dict[str, Any]:

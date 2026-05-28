@@ -7,8 +7,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "vision_tracking",
         "feature": "视觉追踪",
-        "status": "mock_usable",
-        "real_use_gap": "当前有检测器接口、追踪器、mock 场景和底盘动作闭环；真实可用还需要接入现场摄像头检测模型并标定帧率/距离。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有检测器接口、追踪器、mock 场景、底盘动作闭环和硬件契约；真实产品仍需要现场摄像头模型、帧率和距离标定。",
         "evidence": [
             "src/software/perception/tracker.py",
             "src/app/orchestrator.py",
@@ -19,8 +19,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "audio_emotion",
         "feature": "叫声识别",
-        "status": "mock_usable",
-        "real_use_gap": "已有软件抽象层和四分类 mock 特征管线；真实可用还需要麦克风输入、MFCC/CNN 模型替换和现场阈值校准。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有软件抽象层、四分类特征管线和麦克风特征硬件契约；真实产品仍需要硬件侧采样、模型替换和现场阈值校准。",
         "evidence": [
             "src/app/audio_emotion.py",
             "tests/test_app_audio_emotion.py",
@@ -29,8 +29,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "activity_sensing",
         "feature": "活跃度感知",
-        "status": "mock_usable",
-        "real_use_gap": "已有基于目标可见率和动作的 engagement/activity 汇总；真实 PRD 的光流 10 秒评级和本地校准还未实现。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有 10 秒活跃度评分、目标可见率融合和 activity_sample 硬件契约；真实产品仍需要光流/IMU 等硬件侧数据校准。",
         "evidence": [
             "src/app/session_summary.py",
             "src/app/dashboard_preview.py",
@@ -40,8 +40,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "wand_play",
         "feature": "逗猫棒挥舞",
-        "status": "strategy_only",
-        "real_use_gap": "已有动作推荐、偏好选择和惊喜熵候选动作；真实可用还需要机械臂轨迹执行、安全边界和动作幅度标定。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有动作推荐、偏好选择、惊喜熵候选动作和 bounded play actuator 执行契约；真实产品仍需要机械臂轨迹硬件实现与幅度标定。",
         "evidence": [
             "src/app/next_session_plan.py",
             "src/app/surprise_entropy.py",
@@ -51,8 +51,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "laser_chase",
         "feature": "激光点追逐",
-        "status": "strategy_only",
-        "real_use_gap": "已有 laser_escape 软件推荐和新鲜度控制；真实可用还需要激光云台/安全角度/路径规划硬件接口。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有 laser_escape 软件推荐、新鲜度控制和 bounded play actuator 执行契约；真实产品仍需要激光云台、安全角度和路径硬件实现。",
         "evidence": [
             "src/app/personalization_policy.py",
             "src/app/surprise_entropy.py",
@@ -62,8 +62,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "treat_reward",
         "feature": "零食投喂奖励",
-        "status": "mock_usable",
-        "real_use_gap": "已有扑抓成功、每日上限、余量和投喂动作的软件策略；真实可用还需要接入零食机构、重量/余量传感器和落点标定。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有扑抓成功、每日上限、余量策略和 dispense_treat 执行契约；真实产品仍需要零食机构、重量/余量传感器和落点标定。",
         "evidence": [
             "src/app/treat_reward.py",
             "tests/test_app_treat_reward.py",
@@ -72,8 +72,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "water_monitoring",
         "feature": "饮水监测",
-        "status": "hardware_dependent",
-        "real_use_gap": "software/care 有 WaterMonitor 服务雏形；真实可用需要液位传感器接入、校准、异常推送和长时间运行验证。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "software/care 有 WaterMonitor 服务，硬件契约提供 water_state；真实产品仍需要液位传感器实现、校准、推送通道和长时间运行验证。",
         "evidence": [
             "src/software/care/__init__.py",
         ],
@@ -81,8 +81,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "meme_generator",
         "feature": "表情包生成器",
-        "status": "hardware_dependent",
-        "real_use_gap": "software/report 有 meme_generator 管线；真实可用需要摄像头流、YOLO/姿态模型、字体/输出目录和端到端生成验证。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "software/report 有 meme_generator 管线，硬件契约提供摄像头帧入口；真实产品仍需要现场视频流、YOLO/姿态模型、字体/输出目录和端到端生成验证。",
         "evidence": [
             "src/software/report/meme_generator.py",
             "src/software/report/__init__.py",
@@ -91,8 +91,8 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "daily_diary",
         "feature": "猫咪每日日报",
-        "status": "mock_usable",
-        "real_use_gap": "已有会话报告、dashboard、daily diary 和增强报告；真实可用需要接入全天事件数据库、定时任务和推送通道。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有会话报告、dashboard、daily diary、增强报告和运行时事件入口；真实产品仍需要全天事件数据库、定时任务和推送通道部署。",
         "evidence": [
             "src/app/daily_diary.py",
             "src/app/enhanced_report.py",
@@ -115,15 +115,19 @@ PRD_SOFTWARE_FEATURES = [
     {
         "id": "remote_app_control",
         "feature": "远程 APP 控制",
-        "status": "out_of_scope",
-        "real_use_gap": "远程 APP/WebUI 控制按当前产品冲刺要求不做；真实可用需要移动端、视频流、MQTT/WebRTC 和权限体系。",
-        "evidence": [],
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有机器人端 CLI 远程接管、安全 token 门控和 remote_command 硬件契约；真实产品仍需要移动端、视频流、MQTT/WebRTC 和权限体系部署。",
+        "evidence": [
+            "src/app/remote_takeover.py",
+            "src/app/demo.py",
+            "tests/test_app_remote_takeover.py",
+        ],
     },
     {
         "id": "surprise_entropy",
         "feature": "惊喜熵引擎",
-        "status": "mock_usable",
-        "real_use_gap": "已有可解释候选动作评分、安全门控、偏好匹配和 CLI preview；真实可用还需要接入真实动作执行日志与效果反馈。",
+        "status": "hardware_plug_ready",
+        "real_use_gap": "已有可解释候选动作评分、安全门控、偏好匹配、CLI preview 和 play actuator 执行契约；真实产品仍需要真实动作执行日志与效果反馈校准。",
         "evidence": [
             "src/app/surprise_entropy.py",
             "tests/test_app_surprise_entropy.py",
@@ -131,7 +135,7 @@ PRD_SOFTWARE_FEATURES = [
     },
 ]
 
-READY_STATUSES = {"implemented", "mock_usable", "strategy_only", "hardware_dependent", "out_of_scope"}
+READY_STATUSES = {"implemented", "mock_usable", "hardware_plug_ready"}
 BLOCKING_STATUSES = {"missing"}
 
 
@@ -154,8 +158,9 @@ def build_prd_software_coverage() -> dict[str, Any]:
         "counts": counts,
         "blockers": blockers,
         "software_demo_ready": len(blockers) == 0,
+        "hardware_plug_ready": len(blockers) == 0,
         "real_product_ready": False,
-        "real_product_summary": "软件抽象层已按 PRD 覆盖；真实可用产品仍需要硬件、传感器、模型和现场长时间验证。",
+        "real_product_summary": "机器人端纯软件已达到 hardware-plug-ready；真实产品仍需要硬件实现、现场校准和长时间验证。",
     }
 
 
@@ -167,6 +172,7 @@ def build_onsite_demo_check(product_suite: dict[str, Any], intelligence_brief: d
     return {
         "ready": coverage["real_product_ready"] and software_demo_ready,
         "software_abstraction_ready": len(blockers) == 0,
+        "hardware_plug_ready": coverage["hardware_plug_ready"],
         "software_demo_ready": software_demo_ready,
         "real_product_ready": coverage["real_product_ready"],
         "coverage": coverage,
@@ -178,6 +184,8 @@ def build_onsite_demo_check(product_suite: dict[str, Any], intelligence_brief: d
             "python -m src.app.demo --surprise-entropy-preview",
             "python -m src.app.demo --audio-emotion-preview",
             "python -m src.app.demo --treat-reward-preview",
+            "python -m src.app.demo --hardware-plug-check",
+            "python -m src.app.demo --remote-takeover-command stop --remote-token demo --remote-operator-token demo",
             "python -m src.app.demo --product-suite",
             "python -m src.app.demo --mode mock --scenario all --include-memory-update",
         ],

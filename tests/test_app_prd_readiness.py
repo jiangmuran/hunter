@@ -10,25 +10,27 @@ class PrdReadinessTest(unittest.TestCase):
         self.assertFalse(coverage["real_product_ready"])
         self.assertEqual(coverage["blockers"], [])
         self.assertTrue(coverage["software_demo_ready"])
+        self.assertTrue(coverage["hardware_plug_ready"])
         audio = _feature(coverage, "audio_emotion")
         treat = _feature(coverage, "treat_reward")
-        self.assertEqual(audio["status"], "mock_usable")
-        self.assertEqual(treat["status"], "mock_usable")
+        self.assertEqual(audio["status"], "hardware_plug_ready")
+        self.assertEqual(treat["status"], "hardware_plug_ready")
         self.assertIn("src/app/audio_emotion.py", audio["evidence"])
         self.assertIn("src/app/treat_reward.py", treat["evidence"])
 
-    def test_prd_coverage_marks_remote_app_out_of_scope(self):
+    def test_prd_coverage_marks_remote_app_hardware_plug_ready(self):
         coverage = build_prd_software_coverage()
 
         remote = _feature(coverage, "remote_app_control")
-        self.assertEqual(remote["status"], "out_of_scope")
-        self.assertIn("APP/WebUI", remote["real_use_gap"])
+        self.assertEqual(remote["status"], "hardware_plug_ready")
+        self.assertIn("机器人端 CLI", remote["real_use_gap"])
+        self.assertIn("src/app/remote_takeover.py", remote["evidence"])
 
     def test_prd_coverage_includes_surprise_entropy_evidence(self):
         coverage = build_prd_software_coverage()
 
         entropy = _feature(coverage, "surprise_entropy")
-        self.assertEqual(entropy["status"], "mock_usable")
+        self.assertEqual(entropy["status"], "hardware_plug_ready")
         self.assertIn("src/app/surprise_entropy.py", entropy["evidence"])
 
     def test_onsite_check_reports_demo_commands_and_real_gaps(self):
@@ -46,11 +48,12 @@ class PrdReadinessTest(unittest.TestCase):
         self.assertFalse(check["ready"])
         self.assertTrue(check["software_abstraction_ready"])
         self.assertTrue(check["software_demo_ready"])
+        self.assertTrue(check["hardware_plug_ready"])
         self.assertFalse(check["real_product_ready"])
         self.assertIn("python -m src.app.demo --software-intelligence-brief", check["demo_commands"])
         self.assertIn("python -m src.app.demo --audio-emotion-preview", check["demo_commands"])
         self.assertIn("python -m src.app.demo --treat-reward-preview", check["demo_commands"])
-        self.assertIn("真实可用产品", check["real_use_gap_summary"])
+        self.assertIn("真实产品", check["real_use_gap_summary"])
 
     def test_onsite_check_flags_consistency_failures(self):
         check = build_onsite_demo_check(
@@ -67,6 +70,16 @@ class PrdReadinessTest(unittest.TestCase):
         failed = [item["name"] for item in check["consistency_checks"] if not item["passed"]]
         self.assertIn("safe strategy does not select high intensity action", failed)
         self.assertIn("intelligence brief has entropy engine", failed)
+    def test_prd_coverage_reports_hardware_plug_ready_statuses(self):
+        coverage = build_prd_software_coverage()
+        statuses = {feature["id"]: feature["status"] for feature in coverage["features"]}
+
+        self.assertEqual(statuses["wand_play"], "hardware_plug_ready")
+        self.assertEqual(statuses["laser_chase"], "hardware_plug_ready")
+        self.assertEqual(statuses["treat_reward"], "hardware_plug_ready")
+        self.assertEqual(statuses["remote_app_control"], "hardware_plug_ready")
+        self.assertTrue(coverage["hardware_plug_ready"])
+        self.assertFalse(coverage["real_product_ready"])
 
 
 def _feature(coverage, feature_id):

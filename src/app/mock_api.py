@@ -51,6 +51,26 @@ class MockHunterAPI:
     def play_wav(self, filename: str):
         return {"ok": True, "filename": filename}
 
+    def capture_audio_features(self) -> dict[str, Any]:
+        return {"pitch_hz": 650, "energy": 0.62, "duration_ms": 900, "repetition": 2}
+
+    def activity_sample(self) -> dict[str, Any]:
+        return {"motion_score": 0.55, "visible_ratio": 0.75, "window_seconds": 10}
+
+    def execute_play_action(self, action: str, intensity: str = "medium", duration_ms: int = 1200):
+        return self.cmd(f"play:{action}:{intensity}:{duration_ms}")
+
+    def dispense_treat(self, grams: float = 1.0, reason: str = "reward"):
+        entry = self.cmd(f"treat:{grams}:{reason}")
+        entry["dispensed_grams"] = grams
+        return entry
+
+    def water_state(self) -> dict[str, Any]:
+        return {"level_mm": 42, "last_drink_minutes_ago": 90, "sensor_ok": True}
+
+    def remote_command(self, command: str, **params: Any):
+        return self.cmd(f"remote:{command}:{params}")
+
     def state(self) -> dict:
         last = self.command_history[-1]["action"].upper() if self.command_history else "STOP"
         return {

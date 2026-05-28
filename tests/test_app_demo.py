@@ -208,6 +208,25 @@ class DemoTest(unittest.TestCase):
         self.assertIn("consistency_checks", result)
         self.assertIn("python -m src.app.demo --software-mvp-acceptance", result["demo_commands"])
         self.assertNotIn("html", result)
+    def test_hardware_plug_check_cli_reports_contract_ready(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--hardware-plug-check"], verbose=False)
+
+        self.assertTrue(result["contract_ready"])
+        self.assertIn("activity", result)
+
+    def test_remote_takeover_cli_dispatches_stop(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry([
+            "--remote-takeover-command", "stop",
+            "--remote-token", "demo",
+            "--remote-operator-token", "demo",
+        ], verbose=False)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["command"], "stop")
 
 
 if __name__ == "__main__":
