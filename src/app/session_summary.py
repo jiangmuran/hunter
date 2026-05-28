@@ -53,7 +53,7 @@ def summarize_session(states: list[dict[str, Any]], events: list[AppEvent | dict
     final_state = states[-1] if states else {}
     state_counts = Counter(state.get("state") for state in states if state.get("state"))
     command_counts = Counter(_event_message(event) for event in events if _event_kind(event) == EventKind.COMMAND.value)
-    target_seen = any(bool(state.get("target")) for state in states)
+    target_seen = any(state.get("target") and "cx" in state["target"] and "cy" in state["target"] for state in states)
     lost_target = "lost_target" in state_counts
     reached_stop_distance = "at_stop_distance" in state_counts
     error = next((state.get("error") for state in reversed(states) if state.get("error")), None)

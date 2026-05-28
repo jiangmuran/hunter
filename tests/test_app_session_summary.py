@@ -55,8 +55,8 @@ class SessionSummaryTest(unittest.TestCase):
 
         states = [
             {"state": "scanning", "tick": 1, "target": None},
-            {"state": "approaching", "tick": 2, "target": {"cx": 320}},
-            {"state": "at_stop_distance", "tick": 3, "target": {"cx": 320}},
+            {"state": "approaching", "tick": 2, "target": {"cx": 320, "cy": 240}},
+            {"state": "at_stop_distance", "tick": 3, "target": {"cx": 320, "cy": 240}},
         ]
 
         summary = summarize_session(states, [])
@@ -133,6 +133,26 @@ class SessionSummaryTest(unittest.TestCase):
         self.assertEqual(summary["trajectory"]["point_count"], 1)
         self.assertEqual(summary["activity"]["target_visible_ticks"], 1)
         self.assertEqual(summary["activity"]["engagement_score"], 33)
+        # complete target exists, so target_seen and highlights are set
+        self.assertTrue(summary["target_seen"])
+        self.assertIn("target acquired during session", summary["highlights"])
+
+    def test_summarize_session_partial_targets_only_not_seen(self):
+        from src.app.session_summary import summarize_session
+
+        states = [
+            {"state": "aligning", "target": {"cx": 100}, "healthy": True, "last_action": "rotate_cw"},
+            {"state": "scanning", "target": {"cy": 260}, "healthy": True, "last_action": "stop"},
+        ]
+
+        summary = summarize_session(states, [])
+
+        self.assertEqual(summary["trajectory"]["points"], [])
+        self.assertEqual(summary["trajectory"]["point_count"], 0)
+        self.assertEqual(summary["activity"]["target_visible_ticks"], 0)
+        self.assertEqual(summary["activity"]["engagement_score"], 0)
+        self.assertFalse(summary["target_seen"])
+        self.assertNotIn("target acquired during session", summary["highlights"])
 
 
 if __name__ == "__main__":
