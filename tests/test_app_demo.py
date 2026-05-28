@@ -124,6 +124,14 @@ class DemoTest(unittest.TestCase):
         self.assertFalse(session["summary"]["healthy"])
         self.assertIn("session ended in error", session["summary"]["highlights"])
 
+    def test_web_ui_interactive_alias_returns_html(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--web-ui-interactive"], verbose=False)
+
+        self.assertIn("html", result)
+        self.assertIn("Scenario Console", result["html"])
+
 
 if __name__ == "__main__":
     unittest.main()
