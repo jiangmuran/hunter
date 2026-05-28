@@ -145,6 +145,13 @@ class DemoTest(unittest.TestCase):
         self.assertIn("interaction_strategy", result["capabilities"])
         self.assertNotIn("html", result)
 
+    def test_software_intelligence_brief_uses_representative_success_report(self):
+        from src.app.demo import run_demo_entry
+
+        result = run_demo_entry(["--software-intelligence-brief"], verbose=False)
+
+        self.assertIn("看到了猫，并安全靠近到制动距离", result["enhanced_report"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

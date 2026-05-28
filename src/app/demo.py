@@ -254,8 +254,9 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
     profile = build_cat_profile(artifacts, preferences)
     strategy = build_suite_strategy(artifacts)
     next_plan = build_next_session_plan(profile, strategy, product_suite["personalization_preview"])
-    latest_report = artifacts[-1].get("report", {}) if artifacts else {}
-    enhanced_report = build_enhanced_report(latest_report, strategy, profile, next_plan)
+    representative_artifact = _representative_brief_artifact(artifacts)
+    representative_report = representative_artifact.get("report", {}) if representative_artifact else {}
+    enhanced_report = build_enhanced_report(representative_report, strategy, profile, next_plan)
     brief = {
         "capabilities": [
             "interaction_strategy",
@@ -272,6 +273,15 @@ def run_software_intelligence_brief(verbose: bool = True) -> dict[str, Any]:
     if verbose:
         print({"software_intelligence_brief": brief})
     return brief
+
+
+def _representative_brief_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for preferred_outcome in ("success", "partial", "lost_target", "no_target", "error"):
+        for artifact in artifacts:
+            report = artifact.get("report", {}) if isinstance(artifact.get("report", {}), dict) else {}
+            if report.get("outcome") == preferred_outcome:
+                return artifact
+    return artifacts[-1] if artifacts else None
 
 
 def run_web_ui_preview_entry(output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
