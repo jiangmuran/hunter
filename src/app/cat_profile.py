@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+
 DEFAULT_ARM = "wand_slow"
 
 
@@ -9,63 +10,27 @@ def build_cat_profile(
     artifacts: list[dict[str, Any]],
     memory_preferences: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if memory_preferences is None:
-        memory_preferences = []
-
-    # Determine preferred arm from memory or default
-    if memory_preferences:
-        preferred_arm = memory_preferences[0]["arm"]
-    else:
-        preferred_arm = DEFAULT_ARM
-
-    # Calculate engagement level from artifact activity scores
-    if not artifacts:
-        engagement_level = "unknown"
-    else:
-        scores = [
-            artifact.get("summary", {}).get("activity", {}).get("engagement_score", 0)
-            for artifact in artifacts
-        ]
-        avg_score = sum(scores) / len(scores)
-        if avg_score >= 80:
-            engagement_level = "high"
-        elif avg_score >= 50:
-            engagement_level = "medium"
-        else:
-            engagement_level = "low"
-
-    # Map engagement level to play style
-    play_style_map = {
-        "high": "主动追逐型",
-        "medium": "谨慎探索型",
-        "low": "慵懒潜伏型",
-        "unknown": "未知",
-    }
-    play_style = play_style_map[engagement_level]
-
-    # Collect risk flags from non-success outcomes
-    risk_flags = []
-    for artifact in artifacts:
-        outcome = artifact.get("report", {}).get("outcome", "")
-        if outcome and outcome != "success":
-            risk_flags.append(outcome)
-
-    # Build human-readable summary
-    arm_speed_map: dict[str, str] = {
-        "wand_slow": "慢速",
-        "laser_escape": "快速",
-        "wand_hover": "悬停",
-        "wand_fast": "快速",
-    }
-    speed = arm_speed_map.get(preferred_arm, "默认")
+    preferences = memory_preferences or []
+    preferred_arm = preferences[0].get("arm", DEFAULT_ARM) if preferences and isinstance(preferences[0], dict) else DEFAULT_ARM
+    scores = [_engagement_score(artifact) for artifact in artifacts]
+    scores = [score for score in scores if score is not None]
+    outcomes = [_outcome(artifact) for artifact in artifacts]
+    outcomes = [outcome for outcome in outcomes if outcome]
+    risk_flags = sorted({outcome for outcome in outcomes if outcome in {"lost_target", "error"}})
 
     if not artifacts:
-        summary = f"还没有足够的数据来生成猫咪画像。建议使用{speed}玩法开始互动。"
-    else:
-        summary = f"猫咪互动{len(artifacts)}次，活跃度为{engagement_level}，偏好{speed}玩法{preferred_arm}。"
-        if risk_flags:
-            summary += f" 注意风险：{'、'.join(risk_flags)}。"
+        return {
+            "engagement_level": "unknown",
+            "preferred_arm": preferred_arm,
+            "play_style": "待观察型",
+            "risk_flags": [],
+            "summary": "还没有足够历史记录，先使用慢速默认互动观察猫咪反应。",
+        }
 
+    average_score = round(sum(scores) / len(scores)) if scores else 0
+    engagement_level = _engagement_level(average_score)
+    play_style = _play_style(engagement_level, risk_flags)
+    summary = _summary(preferred_arm, engagement_level, risk_flags)
     return {
         "engagement_level": engagement_level,
         "preferred_arm": preferred_arm,
@@ -73,3 +38,43 @@ def build_cat_profile(
         "risk_flags": risk_flags,
         "summary": summary,
     }
+
+
+def _engagement_score(artifact: dict[str, Any]) -> int | float | None:
+    summary = artifact.get("summary", {}) if isinstance(artifact.get("summary", {}), dict) else {}
+    activity = summary.get("activity", {}) if isinstance(summary.get("activity", {}), dict) else {}
+    score = activity.get("engagement_score")
+    return score if isinstance(score, int | float) else None
+
+
+def _outcome(artifact: dict[str, Any]) -> str | None:
+    report = artifact.get("report", {}) if isinstance(artifact.get("report", {}), dict) else {}
+    return report.get("outcome")
+
+
+def _engagement_level(score: int) -> str:
+    if score >= 70:
+        return "high"
+    if score >= 30:
+        return "medium"
+    return "low"
+
+
+def _play_style(engagement_level: str, risk_flags: list[str]) -> str:
+    if "error" in risk_flags or "lost_target" in risk_flags:
+        return "谨慎探索型"
+    if engagement_level == "high":
+        return "主动追逐型"
+    if engagement_level == "medium":
+        return "稳定观察型"
+    return "慢热试探型"
+
+
+def _summary(preferred_arm: str, engagement_level: str, risk_flags: list[str]) -> str:
+    if risk_flags:
+        return f"这只猫对慢速、可预测的互动更稳定，当前推荐 {preferred_arm}。"
+    if engagement_level == "high":
+        return f"这只猫参与度高，可以用 {preferred_arm} 保持节奏明确的互动。"
+    if engagement_level == "medium":
+        return f"这只猫参与度中等，适合用 {preferred_arm} 做稳定试探。"
+    return f"这只猫还在慢热观察，建议用 {preferred_arm} 低强度开始。"
