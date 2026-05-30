@@ -2852,6 +2852,9 @@ body.mode-settings .pane-log .panel-head{cursor:pointer}
 .arm-preset-cell .preset-save{padding:2px 0;font-size:11px;border-color:var(--line2);color:var(--text-dim)}
 .arm-preset-cell .preset-save:hover{color:var(--amber);border-color:var(--amber)}
 #btnArmLoopStart.on{background:rgba(244,196,107,.2);border-color:var(--warn);color:var(--warn)}
+.arm-kbd-legend{display:grid;grid-template-columns:repeat(2,1fr);gap:3px 8px;font-family:var(--font-mono);font-size:10px;color:var(--text-dim);padding:6px 8px;background:rgba(111,214,133,.06);border:1px solid var(--line);margin-bottom:6px;letter-spacing:.05em}
+.arm-kbd-legend>div{display:flex;align-items:center;gap:4px}
+.arm-kbd-legend .kbd{display:inline-block;min-width:18px;padding:1px 4px;background:rgba(111,214,133,.18);border:1px solid var(--line2);color:var(--amber);text-align:center;font-size:10px;font-weight:700;border-radius:1px}
 .arm-toolbar .btn{flex:1;padding:6px 4px;font-size:10px;letter-spacing:.05em}
 .arm-toolbar .badge{margin-left:4px}
 /* Arm joint row */
@@ -3406,6 +3409,15 @@ svg.schem{width:100%;height:100%;display:block}
           <button class="btn compact" id="btnArmReset" title="重置 arm controller(脱限位救援)· disconnect + 重新 from_json + connect。注意:不清 servo 内部 multi-turn 计数,要清那个需断电重启 servo 电源" style="border-color:var(--warn);color:var(--warn)">🔄 RESET ARM</button>
           <button class="btn compact" id="btnExportObs" title="导出所有 joint 浏览器记录的实测 min/max 为 JSON · 复制到剪贴板">📋 EXPORT MIN/MAX</button>
           <button class="btn compact" id="btnResetObs" title="清空浏览器记录(LocalStorage)">RESET OBS</button>
+        </div>
+
+        <!-- 键盘 legend -->
+        <div class="arm-kbd-legend">
+          <div><span class="kbd">W</span><span class="kbd">S</span> J2 SHOULDER</div>
+          <div><span class="kbd">A</span><span class="kbd">D</span> J1 BASE YAW</div>
+          <div><span class="kbd">Q</span><span class="kbd">E</span> J5 FOREARM ROLL</div>
+          <div><span class="kbd">↑</span><span class="kbd">↓</span> J3 ELBOW</div>
+          <div><span class="kbd">←</span><span class="kbd">→</span> J4 FOREARM PITCH</div>
         </div>
 
         <!-- PRESETS · 5 slot 快速保存 / 移动 / 循环 -->
@@ -3991,8 +4003,27 @@ svg.schem{width:100%;height:100%;display:block}
   // ============ Keyboard ============
   const pressed = new Map();  // key -> action(根据 rearMode 决定的实际 cmd)
   let recording = false;
+  // ARM keyboard map: key → [joint_name, delta_deg]
+  // WASD/QE 主体关节,Arrow 细调腕部
+  const armKeyMap = {
+    'w': ['joint_2', 4],   // SHOULDER 抬
+    's': ['joint_2', -4],
+    'a': ['joint_1', -4],  // BASE YAW 左
+    'd': ['joint_1', 4],
+    'q': ['joint_5', 6],   // FOREARM ROLL +
+    'e': ['joint_5', -6],
+    'arrowup':    ['joint_3', -3],  // ELBOW
+    'arrowdown':  ['joint_3', 3],
+    'arrowleft':  ['joint_4', -3],  // FOREARM PITCH
+    'arrowright': ['joint_4', 3],
+  };
+  async function armKbdNudge(joint, delta){
+    try {
+      await fetch('/api/arm/nudge_joint', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({joint, delta_deg: delta})});
+    } catch(e){}
+  }
   document.addEventListener('keydown', ev => {
-    if (ev.repeat) return;
     const k = ev.key.toLowerCase();
     // ESC 是全局停止键,永远生效(即使焦点在 YOLO filter input 框)
     if (k === 'escape'){
@@ -4003,6 +4034,19 @@ svg.schem{width:100%;height:100%;display:block}
       return;
     }
     if (ev.target && (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA')) return;
+    // ARM keyboard:按住物理键 OS auto-repeat 持续触发 nudge,松手停
+    const armEntry = armKeyMap[k];
+    if (armEntry){
+      armKbdNudge(armEntry[0], armEntry[1]);
+      highlightKey(k, true);
+      setTimeout(() => highlightKey(k, false), 120);
+      ev.preventDefault();
+      return;
+    }
+    // 非 arm/系统键:不接受 OS repeat
+    if (ev.repeat) return;
+    // (chassis hold via keyboard 已禁,屏幕底盘按钮仍能 hold)
+    /*
     const action = moveMap()[k];
     if (action){
       if (pressed.has(k)) return;
@@ -4010,6 +4054,7 @@ svg.schem{width:100%;height:100%;display:block}
       startHold(action); highlightKey(k, true);
       ev.preventDefault(); return;
     }
+    */
     switch(k){
       case ' ': doEmergency(); ev.preventDefault(); break;
       case 'o': setObs(true); break;
