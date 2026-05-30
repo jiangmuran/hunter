@@ -295,17 +295,40 @@ src/
 
 <a id="mvp"></a>
 
-## 当前进展：48 小时 MVP
+## 当前进展：48 小时 MVP / Current Status: 48-hour MVP
 
-赛场上宁可展示一个完美运行的单一功能，也不展示三个会卡顿的半成品。
+Hunter 的本次黑客松目标，是验证「猫咪具身 AI」的关键可行性：让系统不仅能看见猫类目标，还能通过真实硬件产生互动，并最终把互动转化为主人可理解的内容。
 
-MVP 保留两个核心：
+受限于分布式开发条件，硬件平台主要在北京现场调试，上层软件模块在南宁远程开发。在大部分开发时间内，软件侧无法直接访问物理机器人；同时硬件平台直到最终 demo 前的最后阶段才恢复可用。因此，本次 demo 采用分层验证策略，而不是强行展示一个未经充分联调的完整闭环。
 
-**反射弧**：轻量 YOLOv8 nano 实时识别猫爪位置，状态机驱动机械臂——目标靠近时瞬间闪避，目标静止后主动试探。评委伸手去抓，机械臂躲开。这是最具视觉冲击力的具身智能演示。
+现场实时展示重点包括：
 
-**运动仪表盘**：视觉捕捉猫的移动轨迹，实时生成热力图和统计数据（互动时长、最高移动速度、爆发冲刺次数）。这证明它不只是执行器，更是数据采集终端。
+- 硬件服务中的 YOLO 视觉检测
+- Raspberry Pi 控制层对机器人与机械臂的控制
+- 机械臂运动作为猫咪互动的物理执行原型
+- 机器人转动、声音播放与真实猫互动的录制素材
 
-底层运行在树莓派 5 上，这份代码仓库包含摄像头流传输和远程监控的基础实现。
+上层软件模块，包括 session 行为编排、长期记忆、个性化策略、日报和 meme 生成，已经作为产品 / 软件原型实现，但尚未在本次 demo 中完整接入实时硬件事件流。
+
+当前日报和 meme 示例使用 mock / prototype 数据展示最终用户体验。下一阶段工作是将真实硬件事件，例如 `cat_detected`、`arm_motion_completed`、`sound_played`，接入 session、memory 和 report 管线，完成从真实机器人互动到用户可见内容的闭环。
+
+---
+
+For this hackathon MVP, Hunter focuses on validating the key feasibility of embodied AI interaction for cats: detecting cat-like targets, producing physical interaction through real hardware, and eventually turning interaction events into owner-facing content.
+
+The project was developed under a distributed hardware/software workflow. The physical robot was developed and debugged on-site in Beijing, while the upper-level software modules were developed remotely in Nanning. Because the software side could not directly access the robot during most of the event, and the hardware platform only became operational shortly before the final demo, there was not enough integration time to complete the full real-time software-hardware loop.
+
+The final demo therefore focuses on the parts that can be verified reliably on the physical robot:
+
+- YOLO-based visual detection in the hardware service
+- Robot and arm control through the Raspberry Pi control layer
+- Mechanical arm movement as the physical interaction primitive
+- Recorded footage of robot motion, sound playback, and real cat interaction
+
+The upper-level software modules — including session orchestration, long-term memory, personalization, daily reports, and meme generation — are implemented as product/software prototypes, but are not yet fully connected to the live hardware event stream in this demo.
+
+Report and meme examples currently use mock/prototype data to illustrate the intended owner-facing experience. The next integration milestone is to connect real hardware events such as `cat_detected`, `arm_motion_completed`, and `sound_played` into the session, memory, and report pipeline.
+
 
 ---
 
