@@ -1546,12 +1546,12 @@ async def arm_home(req: Request, mode: str = "user"):
         except Exception: pass
     def _do():
         with arm_lock:
+            online = set(arm.online_joint_names or [])
             if mode == "zero":
                 return arm.home(speed_deg_s=speed)
-            if mode == "user" and user_home:
-                return arm.move_joints(user_home, speed_deg_s=speed)
-            # startup fallback
-            targets = arm.startup_positions_deg or {}
+            # user / startup 都按 online 过滤,跳过 missing servo(防止 J6 死时 home 整体失败)
+            raw = (user_home if (mode == "user" and user_home) else (arm.startup_positions_deg or {}))
+            targets = {k: v for k, v in raw.items() if k in online}
             if not targets:
                 return arm.home(speed_deg_s=speed)
             return arm.move_joints(targets, speed_deg_s=speed)
@@ -1612,6 +1612,150 @@ async def arm_save_home():
         return {"ok": True, "home_positions_deg": m["_home_positions_deg"]}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ============ Arm Preset Slots + Loop ============
+_arm_loop_state = {"running": False, "thread": None, "cur_idx": None}
+
+def _arm_meta_read():
+    p = os.path.expanduser("~/Desktop/arm_meta.json")
+    if not os.path.exists(p): return p, {}
+    try:
+        with open(p) as f: return p, json.load(f)
+    except Exception: return p, {}
+
+def _arm_meta_write(p, m):
+    with open(p, "w") as f: json.dump(m, f, indent=2, ensure_ascii=False)
+
+
+@app.get("/api/arm/presets", tags=["arm"], summary="所有 5 个预设槽位状态")
+async def arm_presets():
+    _, m = _arm_meta_read()
+    slots = m.get("_preset_slots") or {}
+    return {"slots": [slots.get(str(i)) for i in range(5)]}
+
+
+@app.post("/api/arm/preset/{idx}/save", tags=["arm"], summary="把当前 pose 存到 slot idx (0-4)")
+async def arm_preset_save(idx: int, req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    if idx < 0 or idx >= 5: raise HTTPException(400, "idx must be 0-4")
+    body = {}
+    try:
+        if int(req.headers.get("content-length", "0") or 0) > 0:
+            body = await req.json()
+    except Exception: pass
+    label = body.get("label") or f"Slot {idx+1}"
+    def _do():
+        with arm_lock:
+            return arm.read_present_positions_deg()
+    positions = await asyncio.to_thread(_do)
+    p, m = _arm_meta_read()
+    slots = m.get("_preset_slots") or {}
+    slots[str(idx)] = {
+        "label": label,
+        "positions_deg": {k: round(float(v), 2) for k, v in positions.items()},
+    }
+    m["_preset_slots"] = slots
+    _arm_meta_write(p, m)
+    push_log(f"arm preset[{idx}] '{label}' saved: {len(positions)} joints", "sys")
+    return {"ok": True, "idx": idx, "slot": slots[str(idx)]}
+
+
+@app.post("/api/arm/preset/{idx}/move", tags=["arm"], summary="move 到 slot idx",
+          description="query `?speed_deg_s=180` 控制速度。默认 180°/s 比 controller 的 default 10°/s 快很多")
+async def arm_preset_move(idx: int, speed_deg_s: float = 180):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    if idx < 0 or idx >= 5: raise HTTPException(400, "idx must be 0-4")
+    _, m = _arm_meta_read()
+    slot = (m.get("_preset_slots") or {}).get(str(idx))
+    if not slot: raise HTTPException(404, f"slot {idx} empty")
+    online = set(arm.online_joint_names or [])
+    targets = {k: v for k, v in (slot.get("positions_deg") or {}).items() if k in online}
+    if not targets: raise HTTPException(400, "no online joints in slot")
+    def _do():
+        with arm_lock:
+            return arm.move_joints(targets, speed_deg_s=speed_deg_s)
+    try:
+        goals = await asyncio.to_thread(_do)
+        return {"ok": True, "idx": idx, "moved": targets, "speed_deg_s": speed_deg_s, "goals": goals}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/arm/preset/{idx}/clear", tags=["arm"], summary="清空 slot idx")
+async def arm_preset_clear(idx: int):
+    if idx < 0 or idx >= 5: raise HTTPException(400, "idx must be 0-4")
+    p, m = _arm_meta_read()
+    slots = m.get("_preset_slots") or {}
+    if slots.pop(str(idx), None) is not None:
+        m["_preset_slots"] = slots
+        _arm_meta_write(p, m)
+    return {"ok": True, "idx": idx}
+
+
+@app.post("/api/arm/preset_loop/start", tags=["arm"], summary="循环遍历 slots",
+          description=('body: `{indices: [0,1,2,3], interval_ms: 1000, speed_deg_s: 180, cycles: 0}`\n'
+                       'cycles=0 → 无限循环。只 include 已 save 的 slot,自动跳过 empty。'))
+async def arm_preset_loop_start(req: Request):
+    if arm is None: raise HTTPException(503, "arm not ready")
+    body = await req.json() if int(req.headers.get("content-length", "0") or 0) > 0 else {}
+    raw_indices = body.get("indices") or [0, 1, 2, 3, 4]
+    interval_ms = max(50, int(body.get("interval_ms", 1000)))
+    speed = float(body.get("speed_deg_s", 180))
+    cycles = int(body.get("cycles", 0))
+    _, m = _arm_meta_read()
+    slots_dict = m.get("_preset_slots") or {}
+    indices = [i for i in raw_indices if str(i) in slots_dict]
+    if not indices: raise HTTPException(400, "no saved slot in given indices")
+    online = set(arm.online_joint_names or [])
+
+    # stop previous loop (if running)
+    _arm_loop_state["running"] = False
+    prev = _arm_loop_state.get("thread")
+    if prev and prev.is_alive():
+        prev.join(timeout=2.0)
+
+    def _loop():
+        cycle = 0
+        push_log(f"arm preset loop: indices={indices} interval={interval_ms}ms speed={speed}°/s cycles={cycles or '∞'}", "sys")
+        try:
+            while _arm_loop_state["running"]:
+                for i in indices:
+                    if not _arm_loop_state["running"]: break
+                    slot = slots_dict.get(str(i))
+                    if not slot: continue
+                    targets = {k: v for k, v in (slot.get("positions_deg") or {}).items() if k in online}
+                    if not targets: continue
+                    try:
+                        with arm_lock:
+                            arm.move_joints(targets, speed_deg_s=speed)
+                    except Exception as e:
+                        push_log(f"arm loop slot[{i}] err: {e}", "sys")
+                    _arm_loop_state["cur_idx"] = i
+                    time.sleep(interval_ms / 1000.0)
+                cycle += 1
+                if cycles and cycle >= cycles: break
+        finally:
+            _arm_loop_state["running"] = False
+            _arm_loop_state["cur_idx"] = None
+            push_log(f"arm preset loop ended after {cycle} cycle(s)", "sys")
+
+    _arm_loop_state["running"] = True
+    th = threading.Thread(target=_loop, daemon=True)
+    _arm_loop_state["thread"] = th
+    th.start()
+    return {"ok": True, "indices": indices, "interval_ms": interval_ms, "speed_deg_s": speed, "cycles": cycles}
+
+
+@app.post("/api/arm/preset_loop/stop", tags=["arm"], summary="停止循环")
+async def arm_preset_loop_stop():
+    _arm_loop_state["running"] = False
+    return {"ok": True}
+
+
+@app.get("/api/arm/preset_loop/status", tags=["arm"], summary="循环状态")
+async def arm_preset_loop_status():
+    return {"running": _arm_loop_state["running"], "cur_idx": _arm_loop_state["cur_idx"]}
 
 
 @app.get("/api/arm/meta", tags=["arm"], summary="关节元信息(描述 + 限位 + 校准状态)",
@@ -1680,13 +1824,14 @@ async def arm_move_cartesian(req: Request):
 
 
 @app.post("/api/arm/nudge_joint", tags=["arm"], summary="单关节增量",
-          description="body: `{joint: 'joint_1', delta_deg: float, speed_deg_s?: float}`")
+          description="body: `{joint: 'joint_1', delta_deg: float, speed_deg_s?: float}`. 默认 speed 180°/s 比 controller config 10°/s 快很多")
 async def arm_nudge_joint(req: Request):
     if arm is None: raise HTTPException(503, "arm not ready")
     body = await req.json()
+    speed = body.get("speed_deg_s") or 180
     def _do():
         with arm_lock:
-            return arm.nudge_joint(body["joint"], float(body["delta_deg"]), speed_deg_s=body.get("speed_deg_s"))
+            return arm.nudge_joint(body["joint"], float(body["delta_deg"]), speed_deg_s=speed)
     try:
         goal = await asyncio.to_thread(_do)
         return {"ok": True, "joint": body["joint"], "goal_raw": goal}
@@ -1695,13 +1840,14 @@ async def arm_nudge_joint(req: Request):
 
 
 @app.post("/api/arm/move_joint", tags=["arm"], summary="单关节绝对角度",
-          description="body: `{joint: 'joint_1', target_deg: float, speed_deg_s?: float}`")
+          description="body: `{joint: 'joint_1', target_deg: float, speed_deg_s?: float}`. 默认 180°/s")
 async def arm_move_joint(req: Request):
     if arm is None: raise HTTPException(503, "arm not ready")
     body = await req.json()
+    speed = body.get("speed_deg_s") or 180
     def _do():
         with arm_lock:
-            return arm.move_joint(body["joint"], float(body["target_deg"]), speed_deg_s=body.get("speed_deg_s"))
+            return arm.move_joint(body["joint"], float(body["target_deg"]), speed_deg_s=speed)
     try:
         goal = await asyncio.to_thread(_do)
         return {"ok": True, "joint": body["joint"], "goal_raw": goal}
@@ -2697,6 +2843,15 @@ body.mode-settings .pane-log .panel-head{cursor:pointer}
 .rec-cal-row>span:last-child{color:var(--text-bright);text-align:right;font-variant-numeric:tabular-nums}
 /* Arm toolbar */
 .arm-toolbar{display:flex;gap:4px;align-items:center}
+/* Arm preset slots */
+.arm-preset-row{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px}
+.arm-preset-cell{display:grid;grid-template-rows:1fr 18px;gap:2px}
+.arm-preset-cell .preset-move{padding:8px 2px;font-size:10px;letter-spacing:.05em;line-height:1.1}
+.arm-preset-cell .preset-move.on{background:rgba(111,214,133,.16);border-color:var(--amber);color:var(--amber)}
+.arm-preset-cell .preset-move.cur{background:rgba(111,214,133,.4);border-color:var(--amber);color:var(--bg);box-shadow:inset 0 0 8px rgba(111,214,133,.4)}
+.arm-preset-cell .preset-save{padding:2px 0;font-size:11px;border-color:var(--line2);color:var(--text-dim)}
+.arm-preset-cell .preset-save:hover{color:var(--amber);border-color:var(--amber)}
+#btnArmLoopStart.on{background:rgba(244,196,107,.2);border-color:var(--warn);color:var(--warn)}
 .arm-toolbar .btn{flex:1;padding:6px 4px;font-size:10px;letter-spacing:.05em}
 .arm-toolbar .badge{margin-left:4px}
 /* Arm joint row */
@@ -3251,6 +3406,28 @@ svg.schem{width:100%;height:100%;display:block}
           <button class="btn compact" id="btnArmReset" title="重置 arm controller(脱限位救援)· disconnect + 重新 from_json + connect。注意:不清 servo 内部 multi-turn 计数,要清那个需断电重启 servo 电源" style="border-color:var(--warn);color:var(--warn)">🔄 RESET ARM</button>
           <button class="btn compact" id="btnExportObs" title="导出所有 joint 浏览器记录的实测 min/max 为 JSON · 复制到剪贴板">📋 EXPORT MIN/MAX</button>
           <button class="btn compact" id="btnResetObs" title="清空浏览器记录(LocalStorage)">RESET OBS</button>
+        </div>
+
+        <!-- PRESETS · 5 slot 快速保存 / 移动 / 循环 -->
+        <div>
+          <div class="sec-label" style="display:flex;align-items:center;gap:6px">
+            PRESETS · 5 SLOT · SPEED
+            <input type="range" id="armPresetSpeed" min="20" max="360" step="10" value="180" style="flex:1">
+            <span id="armPresetSpeedVal" style="font-family:var(--font-mono);font-size:10px;color:var(--amber);min-width:42px;text-align:right">180°/s</span>
+          </div>
+          <div class="arm-preset-row" id="armPresetRow">
+            <div class="arm-preset-cell"><button class="btn preset-move" data-preset-move="0">SLOT 1</button><button class="btn compact preset-save" data-preset-save="0" title="保存当前位置">💾</button></div>
+            <div class="arm-preset-cell"><button class="btn preset-move" data-preset-move="1">SLOT 2</button><button class="btn compact preset-save" data-preset-save="1" title="保存当前位置">💾</button></div>
+            <div class="arm-preset-cell"><button class="btn preset-move" data-preset-move="2">SLOT 3</button><button class="btn compact preset-save" data-preset-save="2" title="保存当前位置">💾</button></div>
+            <div class="arm-preset-cell"><button class="btn preset-move" data-preset-move="3">SLOT 4</button><button class="btn compact preset-save" data-preset-save="3" title="保存当前位置">💾</button></div>
+            <div class="arm-preset-cell"><button class="btn preset-move" data-preset-move="4">SLOT 5</button><button class="btn compact preset-save" data-preset-save="4" title="保存当前位置">💾</button></div>
+          </div>
+          <div class="arm-toolbar" style="margin-top:6px">
+            <button class="btn compact" id="btnArmLoopStart" title="按所有已 save 的 slot 顺序循环">▶ LOOP</button>
+            <span style="font-size:9px;color:var(--text-dim)">INTERVAL</span>
+            <input type="range" id="armLoopInterval" min="200" max="3000" step="100" value="800" style="flex:1">
+            <span id="armLoopIntervalVal" style="font-family:var(--font-mono);font-size:10px;color:var(--amber);min-width:54px;text-align:right">800ms</span>
+          </div>
         </div>
 
         <!-- JOINTS 主区,最常用 -->
@@ -4882,6 +5059,110 @@ svg.schem{width:100%;height:100%;display:block}
     // grid 是在 loadArmStatus 第一次执行时构建,稍等再 bind + render
     setTimeout(() => { renderObsUI(); bindObsButtons(); }, 500);
   });
+
+  // ============ Arm Preset Slots + Loop ============
+  const armPresetSpeed = $('#armPresetSpeed');
+  const armPresetSpeedVal = $('#armPresetSpeedVal');
+  if (armPresetSpeed){
+    armPresetSpeed.addEventListener('input', () => {
+      armPresetSpeedVal.textContent = armPresetSpeed.value + '°/s';
+    });
+  }
+  const armLoopInterval = $('#armLoopInterval');
+  const armLoopIntervalVal = $('#armLoopIntervalVal');
+  if (armLoopInterval){
+    armLoopInterval.addEventListener('input', () => {
+      armLoopIntervalVal.textContent = armLoopInterval.value + 'ms';
+    });
+  }
+  async function loadPresets(){
+    try {
+      const r = await fetch('/api/arm/presets');
+      const d = await r.json();
+      (d.slots || []).forEach((slot, i) => {
+        const btn = document.querySelector(`[data-preset-move="${i}"]`);
+        if (!btn) return;
+        if (slot){
+          btn.textContent = slot.label || `SLOT ${i+1}`;
+          btn.classList.add('on');
+          btn.title = `${Object.keys(slot.positions_deg||{}).length} joints saved · click 移动 · 长按重命名`;
+        } else {
+          btn.textContent = `SLOT ${i+1}`;
+          btn.classList.remove('on');
+          btn.title = '空 · 先保存才能移动';
+        }
+      });
+    } catch(e){}
+  }
+  // click move
+  document.querySelectorAll('[data-preset-move]').forEach(b => {
+    b.addEventListener('click', async () => {
+      if (!b.classList.contains('on')) {
+        b.style.borderColor = 'var(--err)';
+        setTimeout(() => { b.style.borderColor = ''; }, 600);
+        return;
+      }
+      const idx = b.dataset.presetMove;
+      const speed = armPresetSpeed?.value || 180;
+      b.style.background = 'rgba(111,214,133,.4)';
+      try {
+        const r = await fetch(`/api/arm/preset/${idx}/move?speed_deg_s=${speed}`, {method:'POST'});
+        b.style.background = r.ok ? 'rgba(111,214,133,.2)' : 'rgba(255,90,106,.3)';
+      } catch(e){ b.style.background = 'rgba(255,90,106,.3)'; }
+      setTimeout(() => { b.style.background = ''; }, 800);
+    });
+  });
+  // click save (with confirm + optional label)
+  document.querySelectorAll('[data-preset-save]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const idx = b.dataset.presetSave;
+      const cur = document.querySelector(`[data-preset-move="${idx}"]`);
+      const has = cur?.classList.contains('on');
+      const label = prompt(has ? `覆盖 Slot ${parseInt(idx)+1}\n输入新名字(空=保留旧名):` : `保存到 Slot ${parseInt(idx)+1}\n名字(留空用默认):`, has ? cur.textContent : `Slot ${parseInt(idx)+1}`);
+      if (label === null) return;  // cancel
+      try {
+        await fetch(`/api/arm/preset/${idx}/save`, {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({label: label || `Slot ${parseInt(idx)+1}`})});
+        await loadPresets();
+      } catch(e){}
+    });
+  });
+  // loop toggle
+  let armLoopRunning = false;
+  const btnLoop = $('#btnArmLoopStart');
+  if (btnLoop){
+    btnLoop.addEventListener('click', async () => {
+      if (armLoopRunning){
+        await fetch('/api/arm/preset_loop/stop', {method:'POST'});
+        return;
+      }
+      const indices = [];
+      document.querySelectorAll('[data-preset-move]').forEach(b => {
+        if (b.classList.contains('on')) indices.push(parseInt(b.dataset.presetMove));
+      });
+      if (indices.length < 2){ alert('至少 2 个 slot 已保存才能循环'); return; }
+      const speed = parseFloat(armPresetSpeed?.value || 180);
+      const interval_ms = parseInt(armLoopInterval?.value || 800);
+      await fetch('/api/arm/preset_loop/start', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({indices, interval_ms, speed_deg_s: speed, cycles: 0})});
+    });
+  }
+  // poll loop status to highlight cur_idx + toggle button text
+  async function pollLoop(){
+    try {
+      const r = await fetch('/api/arm/preset_loop/status'); const d = await r.json();
+      armLoopRunning = !!d.running;
+      if (btnLoop){
+        btnLoop.classList.toggle('on', armLoopRunning);
+        btnLoop.textContent = armLoopRunning ? '■ STOP LOOP' : '▶ LOOP';
+      }
+      document.querySelectorAll('.preset-move').forEach(el => {
+        el.classList.toggle('cur', armLoopRunning && d.cur_idx !== null && parseInt(el.dataset.presetMove) === d.cur_idx);
+      });
+    } catch(e){}
+  }
+  loadPresets();
+  setInterval(pollLoop, 500);
 
   // ARM torque toggle
   let armTorqueOn = false;
