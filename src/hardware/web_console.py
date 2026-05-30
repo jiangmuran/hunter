@@ -1598,18 +1598,28 @@ async def arm_reset():
 async def arm_save_home():
     if arm is None: raise HTTPException(503, "arm not ready")
     meta_path = os.path.expanduser("~/Desktop/arm_meta.json")
+    # 用 read_state() 而不是 read_present_positions_deg() — 后者 J6 missing 会抛
     def _do():
         with arm_lock:
-            return arm.read_present_positions_deg()
+            try:
+                st = arm.read_state()
+                pos = st.get("present_positions_deg") or {}
+            except Exception:
+                pos = arm.startup_positions_deg or {}
+            online = set(arm.online_joint_names or [])
+            return {k: float(v) for k, v in pos.items() if k in online}
     try:
         positions = await asyncio.to_thread(_do)
+        if not positions:
+            raise HTTPException(503, "no joints online")
         m = {}
         if os.path.exists(meta_path):
             with open(meta_path) as f: m = json.load(f)
-        m["_home_positions_deg"] = {k: round(float(v), 2) for k, v in positions.items()}
+        m["_home_positions_deg"] = {k: round(v, 2) for k, v in positions.items()}
         with open(meta_path, "w") as f: json.dump(m, f, indent=2, ensure_ascii=False)
         push_log(f"home position saved: {m['_home_positions_deg']}", "sys")
         return {"ok": True, "home_positions_deg": m["_home_positions_deg"]}
+    except HTTPException: raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -1645,18 +1655,36 @@ async def arm_preset_save(idx: int, req: Request):
             body = await req.json()
     except Exception: pass
     label = body.get("label") or f"Slot {idx+1}"
+    # 用 read_state() 而不是 read_present_positions_deg() — 前者内部过滤 missing servo,
+    # 后者 J6 missing 时会抛 ConnectionError 触发 500
     def _do():
         with arm_lock:
-            return arm.read_present_positions_deg()
-    positions = await asyncio.to_thread(_do)
+            try:
+                st = arm.read_state()
+                pos = st.get("present_positions_deg") or {}
+            except Exception:
+                # 兜底:用 cached startup positions
+                pos = arm.startup_positions_deg or {}
+            # filter to online joints,排除 missing servo
+            online = set(arm.online_joint_names or [])
+            return {k: float(v) for k, v in pos.items() if k in online}
+    try:
+        positions = await asyncio.to_thread(_do)
+    except Exception as e:
+        raise HTTPException(500, f"read positions failed: {e}")
+    if not positions:
+        raise HTTPException(503, "no joints online to save")
     p, m = _arm_meta_read()
     slots = m.get("_preset_slots") or {}
     slots[str(idx)] = {
         "label": label,
-        "positions_deg": {k: round(float(v), 2) for k, v in positions.items()},
+        "positions_deg": {k: round(v, 2) for k, v in positions.items()},
     }
     m["_preset_slots"] = slots
-    _arm_meta_write(p, m)
+    try:
+        _arm_meta_write(p, m)
+    except Exception as e:
+        raise HTTPException(500, f"write meta failed: {e}")
     push_log(f"arm preset[{idx}] '{label}' saved: {len(positions)} joints", "sys")
     return {"ok": True, "idx": idx, "slot": slots[str(idx)]}
 
